@@ -4,8 +4,8 @@ services:
     env: node
     region: oregon
     plan: free
-    buildCommand: npm ci && npx tsc && npx prisma db push --accept-data-loss --url="$DATABASE_URL" && ls dist/
-    startCommand: node dist/server.js
+    buildCommand: npm install && npx tsc
+    startCommand: npx prisma db push --accept-data-loss --url "$DATABASE_URL" && node dist/server.js
     healthCheckPath: /api/health
     envVars:
       - key: DATABASE_URL
@@ -19,7 +19,7 @@ services:
     region: oregon
     plan: free
     schedule: "0 * * * *"
-    buildCommand: npm ci && npx tsc && npx prisma db push --accept-data-loss --url="$DATABASE_URL" && ls dist/
+    buildCommand: npm install && npx tsc
     startCommand: node dist/scrape.js
     envVars:
       - key: DATABASE_URL
