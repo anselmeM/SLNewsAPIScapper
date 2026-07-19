@@ -1,10 +1,9 @@
 import Parser from 'rss-parser';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
-import { PrismaClient } from '@prisma/client';
+import { prisma } from '../db.js';
 import { SIERRA_LEONE_SOURCES, NewsSourceConfig } from '../config/sources.js';
 
-const prisma = new PrismaClient();
 const parser = new Parser();
 
 async function scrapeFullContent(url: string, selector: string): Promise<string[]> {
