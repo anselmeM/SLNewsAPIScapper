@@ -1,4 +1,4 @@
-import { runSierraLeoneIngestion } from './services/scraper';
+import { runSierraLeoneIngestion } from './services/scraper.js';
 
 runSierraLeoneIngestion()
   .then(() => {

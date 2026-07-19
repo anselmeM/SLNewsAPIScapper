@@ -1,6 +1,6 @@
 import express from 'express';
 import cors from 'cors';
-import newsRoutes from './routes/news';
+import newsRoutes from './routes/news.js';
 
 const app = express();
 

@@ -1,5 +1,5 @@
-import { runSierraLeoneIngestion } from './services/scraper';
-import app from './server';
+import { runSierraLeoneIngestion } from './services/scraper.js';
+import app from './server.js';
 
 const PORT = process.env.PORT || 3000;
 const args = process.argv.slice(2);
