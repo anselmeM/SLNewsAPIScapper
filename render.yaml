@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: sl-news-api
+    env: node
+    region: oregon
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: node dist/server.js
+    healthCheckPath: /api/health
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: PORT
+        value: "3000"
+
+  - type: cron
+    name: sl-news-scraper
+    env: node
+    region: oregon
+    plan: free
+    schedule: "0 * * * *"
+    buildCommand: npm ci && npm run build
+    startCommand: node dist/scrape.js
+    envVars:
+      - key: DATABASE_URL
+        sync: false
