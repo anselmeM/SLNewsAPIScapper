@@ -7,6 +7,17 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+app.get('/', (_req, res) => {
+  res.json({
+    name: 'Sierra Leone News API',
+    endpoints: {
+      news: '/api/news?limit=20&source=<name>',
+      article: '/api/news/:id',
+      health: '/api/health'
+    }
+  });
+});
+
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
