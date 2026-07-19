@@ -38,11 +38,12 @@ npm start          # API on port 3000
 | `npm start` | Start API from compiled JS |
 | `npm run scrape` | Run scraper once (TS) |
 
-## Deploy (Render)
+## Deploy
 
-1. Push to GitHub
-2. On Render, choose **Blueprint** deploy — it reads `render.yaml`
-3. Set `DATABASE_URL` env var to your Neon connection string
-4. Run `npx prisma db push` after first deploy
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/anselmeM/SLNewsAPIScapper)
+
+1. Click the button above, or on Render choose **New → Blueprint** and connect this repo
+2. When prompted, paste your Neon `DATABASE_URL`
+3. Tables are created automatically on first deploy (`prisma db push`)
 
 The scraper cron runs hourly. The API auto-scales from `dist/server.js`.
