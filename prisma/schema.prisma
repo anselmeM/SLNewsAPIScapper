@@ -11,6 +11,7 @@ model Article {
   title      String
   link       String   @unique
   author     String
+  imageUrl   String?
   paragraphs String[]
   pubDate    DateTime
   source     String

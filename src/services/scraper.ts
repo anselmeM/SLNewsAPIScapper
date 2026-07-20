@@ -17,8 +17,6 @@ function safeParseDate(dateStr?: string): Date {
   return isNaN(d.getTime()) ? new Date() : d;
 }
 
-// Some feeds (e.g. Politico SL) embed a URL-encoded HTML anchor in <link>
-// instead of a plain URL. Decode and extract the real href when detected.
 function extractRealLink(rawLink: string): string {
   if (!rawLink.includes('%3C') && !rawLink.includes('<')) return rawLink;
   try {
@@ -45,6 +43,41 @@ function paragraphsFromHtml(html: string): string[] {
     if (text && text.length > 40) paragraphs.push(text);
   });
   return paragraphs;
+}
+
+function firstImageFromHtml(html: string): string | null {
+  const $ = cheerio.load(html);
+  const src = $('img').first().attr('src');
+  return src || null;
+}
+
+function getFeedContentHtml(item: any): string {
+  return item['content:encoded'] || item.content || item.description || '';
+}
+
+async function findArticleImage(link: string, feedHtml: string): Promise<string | null> {
+  if (feedHtml) {
+    const src = firstImageFromHtml(feedHtml);
+    if (src) {
+      if (src.startsWith('http')) return src;
+      try { return new URL(src, link).href; } catch { }
+    }
+  }
+
+  try {
+    const { data } = await axios.get(link, {
+      timeout: 8000,
+      headers: { 'User-Agent': USER_AGENT },
+    });
+    const $ = cheerio.load(data);
+    const ogImage = $('meta[property="og:image"]').attr('content');
+    if (ogImage) {
+      if (ogImage.startsWith('http')) return ogImage;
+      try { return new URL(ogImage, link).href; } catch { }
+    }
+  } catch { }
+
+  return null;
 }
 
 async function scrapeFullContent(url: string, selector: string): Promise<string[]> {
@@ -90,11 +123,14 @@ export async function runSierraLeoneIngestion() {
           console.log(`-> Ingesting: ${item.title}`);
           let paragraphs = await scrapeFullContent(link, source.contentSelector);
 
-          // Fallback: use full article HTML embedded in the feed itself
-          if (paragraphs.length === 0) {
-            const feedContent = (item as any)['content:encoded'] || item.content || '';
-            if (feedContent) paragraphs = paragraphsFromHtml(feedContent);
+          const feedHtml = getFeedContentHtml(item);
+
+          // Fallback: use paragraphs from feed content
+          if (paragraphs.length === 0 && feedHtml) {
+            paragraphs = paragraphsFromHtml(feedHtml);
           }
+
+          const imageUrl = await findArticleImage(link, feedHtml);
 
           await prisma.article.create({
             data: {
@@ -102,6 +138,7 @@ export async function runSierraLeoneIngestion() {
               link: link,
               pubDate: safeParseDate(item.pubDate),
               author: item.creator || source.name,
+              imageUrl: imageUrl,
               paragraphs: paragraphs,
               source: source.name
             }
