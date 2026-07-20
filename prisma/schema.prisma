@@ -7,13 +7,15 @@ generator client {
 }
 
 model Article {
-  id         Int      @id @default(autoincrement())
-  title      String
-  link       String   @unique
-  author     String
-  imageUrl   String?
-  paragraphs String[]
-  pubDate    DateTime
-  source     String
-  createdAt  DateTime @default(now())
+  id          Int      @id @default(autoincrement())
+  title       String
+  link        String   @unique
+  author      String
+  description String?
+  category    String[]
+  imageUrl    String?
+  paragraphs  String[]
+  pubDate     DateTime
+  source      String
+  createdAt   DateTime @default(now())
 }

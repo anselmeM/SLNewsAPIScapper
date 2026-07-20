@@ -55,6 +55,18 @@ function getFeedContentHtml(item: any): string {
   return item['content:encoded'] || item.content || item.description || '';
 }
 
+function extractDescription(item: any): string | null {
+  if (item.contentSnippet) {
+    const trimmed = item.contentSnippet.trim();
+    if (trimmed.length > 0) return trimmed.slice(0, 500);
+  }
+  if (item.description) {
+    const stripped = item.description.replace(/<[^>]*>/g, '').trim();
+    if (stripped.length > 0) return stripped.slice(0, 500);
+  }
+  return null;
+}
+
 async function findArticleImage(link: string, feedHtml: string): Promise<string | null> {
   if (feedHtml) {
     const src = firstImageFromHtml(feedHtml);
@@ -101,8 +113,58 @@ async function scrapeFullContent(url: string, selector: string): Promise<string[
   }
 }
 
+async function backfillArticleMeta(): Promise<void> {
+  const counts = await prisma.article.count({
+    where: { OR: [{ imageUrl: null }, { description: null }, { category: { equals: [] } }] },
+  });
+  if (counts === 0) return;
+
+  console.log(`Backfilling ${counts} articles with missing metadata...`);
+
+  const allArticles = await prisma.article.findMany({
+    select: { id: true, link: true, imageUrl: true, description: true, category: true },
+  });
+  const linkMap = new Map(allArticles.map(a => [a.link, a]));
+
+  for (const source of SIERRA_LEONE_SOURCES) {
+    try {
+      const feed = await parser.parseURL(source.feedUrl);
+      for (const item of feed.items) {
+        if (!item.link) continue;
+        const link = extractRealLink(item.link);
+        const existing = linkMap.get(link);
+        if (!existing) continue;
+
+        const updateData: any = {};
+
+        if (!existing.imageUrl) {
+          const feedHtml = getFeedContentHtml(item);
+          const img = await findArticleImage(link, feedHtml);
+          if (img) updateData.imageUrl = img;
+        }
+
+        if (!existing.description) {
+          const desc = extractDescription(item);
+          if (desc) updateData.description = desc;
+        }
+
+        if (existing.category.length === 0 && item.categories && item.categories.length > 0) {
+          updateData.category = item.categories;
+        }
+
+        if (Object.keys(updateData).length > 0) {
+          await prisma.article.update({ where: { id: existing.id }, data: updateData });
+          console.log(`  [${existing.id}] ${item.title?.slice(0, 50)}`);
+        }
+      }
+    } catch { }
+  }
+}
+
 export async function runSierraLeoneIngestion() {
   console.log(`[${new Date().toISOString()}] Starting Sierra Leone Ingestion Cycle...`);
+
+  await backfillArticleMeta();
 
   for (const source of SIERRA_LEONE_SOURCES) {
     console.log(`Checking feed: ${source.name}`);
@@ -131,6 +193,7 @@ export async function runSierraLeoneIngestion() {
           }
 
           const imageUrl = await findArticleImage(link, feedHtml);
+          const description = extractDescription(item);
 
           await prisma.article.create({
             data: {
@@ -138,6 +201,8 @@ export async function runSierraLeoneIngestion() {
               link: link,
               pubDate: safeParseDate(item.pubDate),
               author: item.creator || source.name,
+              description: description,
+              category: item.categories || [],
               imageUrl: imageUrl,
               paragraphs: paragraphs,
               source: source.name
