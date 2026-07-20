@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import { prisma } from './db.js';
 import newsRoutes from './routes/news.js';
 
 const app = express();
@@ -20,6 +21,22 @@ app.get('/', (_req, res) => {
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Fallback direct route (Express 5 can be picky about Router base path matching)
+app.get('/api/news', async (req, res) => {
+  try {
+    const { source, limit = 20 } = req.query;
+    const queryOptions: any = {
+      orderBy: { pubDate: 'desc' },
+      take: Number(limit)
+    };
+    if (source) queryOptions.where = { source: String(source) };
+    const articles = await prisma.article.findMany(queryOptions);
+    res.json(articles);
+  } catch {
+    res.status(500).json({ error: "Failed to retrieve articles" });
+  }
 });
 
 app.use('/api/news', newsRoutes);
