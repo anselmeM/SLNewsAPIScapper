@@ -1,20 +1,17 @@
 import { runSierraLeoneIngestion } from './services/scraper.js';
-import app from './server.js';
+import logger from './logger.js';
 
-const PORT = process.env.PORT || 3000;
 const args = process.argv.slice(2);
 
 async function main() {
   await runSierraLeoneIngestion();
 
   if (!args.includes('--scrape-only')) {
-    app.listen(PORT, () => {
-      console.log(`Sierra Leone News API running on port ${PORT}`);
-    });
+    await import('./server.js');
   }
 }
 
 main().catch((err) => {
-  console.error('Fatal error:', err);
+  logger.fatal(err, 'Fatal error');
   process.exit(1);
 });

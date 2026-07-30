@@ -1,11 +1,12 @@
 import { runSierraLeoneIngestion } from './services/scraper.js';
+import logger from './logger.js';
 
 runSierraLeoneIngestion()
   .then(() => {
-    console.log('Scrape cycle finished.');
+    logger.info('Scrape cycle finished');
     process.exit(0);
   })
   .catch((err) => {
-    console.error('Scrape failed:', err);
+    logger.fatal(err, 'Scrape failed');
     process.exit(1);
   });

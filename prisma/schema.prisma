@@ -18,4 +18,8 @@ model Article {
   pubDate     DateTime
   source      String
   createdAt   DateTime @default(now())
+
+  @@index([pubDate])
+  @@index([source])
+  @@index([createdAt])
 }
