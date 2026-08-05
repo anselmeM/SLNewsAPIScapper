@@ -8,6 +8,7 @@ vi.mock('../db.js', () => ({
       findUnique: vi.fn(),
       create: vi.fn(),
       update: vi.fn(),
+      upsert: vi.fn().mockResolvedValue({ id: 1 }),
     },
   },
 }));

@@ -1,5 +1,5 @@
 import Parser from 'rss-parser';
-import axios from 'axios';
+import axios, { AxiosRequestConfig, AxiosResponse } from 'axios';
 import * as cheerio from 'cheerio';
 import { prisma } from '../db.js';
 import { SIERRA_LEONE_SOURCES, NewsSourceConfig } from '../config/sources.js';
@@ -8,9 +8,40 @@ import logger from '../logger.js';
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
 
+const RETRY_DELAY_MS = 1000;
+const MAX_RETRIES = 3;
+
 const parser = new Parser({
   headers: { 'User-Agent': USER_AGENT },
 });
+
+/**
+ * GET with exponential backoff (1s, 2s, 4s). Transient network errors, 5xx and
+ * 429 (rate limit) are retried; other 4xx responses are not — e.g. a 404 from a
+ * numbered sitemap page is how we detect the end of the sitemap.
+ */
+async function fetchWithRetry(
+  url: string,
+  options: AxiosRequestConfig = {},
+  retries = MAX_RETRIES,
+): Promise<AxiosResponse> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await axios.get(url, options);
+    } catch (err) {
+      lastError = err;
+      const status = (err as { response?: { status?: number } }).response?.status;
+      if (status !== undefined && status < 500 && status !== 429) throw err;
+      if (attempt < retries) {
+        const delayMs = process.env.NODE_ENV === 'test' ? 0 : RETRY_DELAY_MS * 2 ** (attempt - 1);
+        logger.warn({ url, attempt, err }, 'Request failed; retrying');
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+  }
+  throw lastError;
+}
 
 interface FeedItem {
   link?: string;
@@ -104,7 +135,7 @@ async function findArticleImage(link: string, feedHtml: string): Promise<string 
   }
 
   try {
-    const { data } = await axios.get(link, {
+    const { data } = await fetchWithRetry(link, {
       timeout: 8000,
       headers: { 'User-Agent': USER_AGENT },
     });
@@ -125,7 +156,7 @@ async function findArticleImage(link: string, feedHtml: string): Promise<string 
 
 async function scrapeFullContent(url: string, selector: string): Promise<string[]> {
   try {
-    const { data } = await axios.get(url, {
+    const { data } = await fetchWithRetry(url, {
       timeout: 10000,
       headers: { 'User-Agent': USER_AGENT },
     });
@@ -213,6 +244,7 @@ export async function runSierraLeoneIngestion() {
 
           const existing = await prisma.article.findUnique({
             where: { link },
+            select: { id: true },
           });
 
           if (!existing) {
@@ -228,8 +260,12 @@ export async function runSierraLeoneIngestion() {
             const imageUrl = await findArticleImage(link, feedHtml);
             const description = extractDescription(item);
 
-            await prisma.article.create({
-              data: {
+            // Upsert instead of create: if an overlapping scrape run ingested this
+            // link in the meantime, this becomes a no-op instead of a unique-constraint crash.
+            await prisma.article.upsert({
+              where: { link },
+              update: {},
+              create: {
                 title: item.title,
                 link: link,
                 pubDate: safeParseDate(item.pubDate),
@@ -300,7 +336,7 @@ async function scrapeTelegraphFromSitemap(): Promise<void> {
 
       let urls: string[];
       try {
-        const resp = await axios.get(sitemapUrl, {
+        const resp = await fetchWithRetry(sitemapUrl, {
           timeout: 15000,
           headers: { 'User-Agent': USER_AGENT },
         });
@@ -327,7 +363,7 @@ async function scrapeTelegraphFromSitemap(): Promise<void> {
         if (existingLinks.has(url)) continue;
 
         try {
-          const pageResp = await axios.get(url, {
+          const pageResp = await fetchWithRetry(url, {
             timeout: 10000,
             headers: { 'User-Agent': USER_AGENT },
           });
@@ -353,8 +389,10 @@ async function scrapeTelegraphFromSitemap(): Promise<void> {
             if (text && text.length > 40) paragraphs.push(text);
           });
 
-          await prisma.article.create({
-            data: {
+          await prisma.article.upsert({
+            where: { link: url },
+            update: {},
+            create: {
               title: title.slice(0, 500),
               link: url,
               pubDate: pubDateStr ? new Date(pubDateStr) : new Date(),
