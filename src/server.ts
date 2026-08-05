@@ -1,8 +1,10 @@
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
+import crypto from 'crypto';
 import rateLimit from 'express-rate-limit';
 import swaggerUi from 'swagger-ui-express';
+import pinoHttp from 'pino-http';
 import newsRouter from './routes/news.js';
 import { prisma } from './db.js';
 import { swaggerSpec } from './config/swagger.js';
@@ -16,6 +18,10 @@ const allowedOrigin = process.env.CORS_ORIGIN || '*';
 app.use(cors({ origin: allowedOrigin }));
 
 app.use(express.json());
+
+if (process.env.NODE_ENV !== 'test') {
+  app.use(pinoHttp({ logger }));
+}
 
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -32,13 +38,20 @@ app.use('/api', limiter);
 
 const API_KEY = process.env.API_KEY;
 
+function timingSafeEqualStr(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
+}
+
 function requireApiKey(req: express.Request, res: express.Response, next: express.NextFunction) {
   if (!API_KEY) {
     logger.error('API_KEY not configured on server');
     return res.status(500).json({ error: 'Server misconfiguration: API_KEY is not set' });
   }
-  const key = req.headers.authorization?.replace('Bearer ', '');
-  if (key === API_KEY) return next();
+  // Scheme is case-insensitive per RFC 7235: accept "Bearer", "bearer", etc.
+  const match = /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? '');
+  const key = match?.[1] ?? '';
+  if (key && timingSafeEqualStr(key, API_KEY)) return next();
   res.status(401).json({ error: 'Unauthorized — provide a valid API key via Authorization: Bearer <key>' });
 }
 
@@ -58,6 +71,7 @@ app.get('/', (_req, res) => {
 app.use('/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
 app.get('/api/health', async (_req, res) => {
+  res.set('Cache-Control', 'no-store');
   try {
     await prisma.$queryRaw`SELECT 1`;
     res.json({ status: 'ok', database: 'connected', timestamp: new Date().toISOString() });
@@ -67,6 +81,11 @@ app.get('/api/health', async (_req, res) => {
 });
 
 app.use('/api/news', requireApiKey, newsRouter);
+
+// JSON 404 for unknown routes (Express's default is an HTML "Cannot GET" page)
+app.use((_req, res) => {
+  res.status(404).json({ error: 'Not found' });
+});
 
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   logger.error(err, 'Unhandled error');

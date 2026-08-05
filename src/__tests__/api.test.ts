@@ -8,6 +8,7 @@ vi.mock('../db.js', () => ({
     article: {
       findMany: vi.fn(),
       findUnique: vi.fn(),
+      count: vi.fn().mockResolvedValue(1),
     },
     $queryRaw: vi.fn(),
     $disconnect: vi.fn(),
@@ -95,6 +96,43 @@ describe('GET /api/news', () => {
     expect(res.body[0].title).toBe('Test Article');
   });
 
+  it('accepts a lowercase bearer scheme', async () => {
+    const mockFindMany = prisma.article.findMany as ReturnType<typeof vi.fn>;
+    mockFindMany.mockResolvedValueOnce(mockArticles);
+
+    const res = await app.get('/api/news').set('Authorization', 'bearer test-key-123');
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+  });
+
+  it('passes pagination params to the query', async () => {
+    const mockFindMany = prisma.article.findMany as ReturnType<typeof vi.fn>;
+    mockFindMany.mockResolvedValueOnce(mockArticles);
+
+    const res = await app.get('/api/news?limit=10&page=2').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(200);
+    expect(mockFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({ take: 10, skip: 10, orderBy: [{ pubDate: 'desc' }, { id: 'desc' }] }),
+    );
+  });
+
+  it('reports the total article count via X-Total-Count', async () => {
+    const mockFindMany = prisma.article.findMany as ReturnType<typeof vi.fn>;
+    mockFindMany.mockResolvedValueOnce(mockArticles);
+
+    const res = await app.get('/api/news').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(200);
+    expect(res.headers['x-total-count']).toBe('1');
+  });
+
+  it('sets cache headers on the list response', async () => {
+    const mockFindMany = prisma.article.findMany as ReturnType<typeof vi.fn>;
+    mockFindMany.mockResolvedValueOnce(mockArticles);
+
+    const res = await app.get('/api/news').set('Authorization', 'Bearer test-key-123');
+    expect(res.headers['cache-control']).toContain('public');
+  });
+
   it('returns 400 for invalid limit', async () => {
     const res = await app.get('/api/news?limit=0').set('Authorization', 'Bearer test-key-123');
     expect(res.status).toBe(400);
@@ -105,6 +143,12 @@ describe('GET /api/news', () => {
     const res = await app.get('/api/news?limit=1.5').set('Authorization', 'Bearer test-key-123');
     expect(res.status).toBe(400);
     expect(res.body.error).toContain('limit');
+  });
+
+  it('returns 400 for invalid page', async () => {
+    const res = await app.get('/api/news?page=0').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('page');
   });
 
   it('returns 400 for invalid source', async () => {
@@ -142,6 +186,24 @@ describe('GET /api/news/:id', () => {
     const res = await app.get('/api/news/1').set('Authorization', 'Bearer test-key-123');
     expect(res.status).toBe(200);
     expect(res.body.title).toBe('Test Article');
+  });
+
+  it('sets cache headers on the article response', async () => {
+    const mockFindUnique = prisma.article.findUnique as ReturnType<typeof vi.fn>;
+    mockFindUnique.mockResolvedValueOnce(mockArticles[0]);
+
+    const res = await app.get('/api/news/1').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(200);
+    expect(res.headers['cache-control']).toContain('public');
+  });
+});
+
+describe('Unknown routes', () => {
+  it('returns a JSON 404 for unknown API paths', async () => {
+    const res = await app.get('/api/nonexistent');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Not found');
+    expect(res.headers['content-type']).toContain('application/json');
   });
 });
 

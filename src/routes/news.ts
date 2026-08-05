@@ -10,8 +10,9 @@ const MAX_LIMIT = 100;
 const DEFAULT_LIMIT = 20;
 
 interface NewsQueryOptions {
-  orderBy: { pubDate: 'desc' | 'asc' };
+  orderBy: Array<{ pubDate: 'desc' } | { id: 'desc' }>;
   take: number;
+  skip?: number;
   where?: { source: string };
 }
 
@@ -31,12 +32,24 @@ interface NewsQueryOptions {
  *           maximum: 100
  *           default: 20
  *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           default: 1
+ *         description: Page number for pagination (1-based)
+ *       - in: query
  *         name: source
  *         schema:
  *           type: string
  *     responses:
  *       200:
  *         description: Paginated list of articles
+ *         headers:
+ *           X-Total-Count:
+ *             schema:
+ *               type: integer
+ *             description: Total number of articles matching the query
  *       400:
  *         description: Invalid parameters
  *       401:
@@ -44,16 +57,26 @@ interface NewsQueryOptions {
  */
 router.get('/', async (req: Request, res: Response) => {
   try {
-    const { source, limit } = req.query;
+    const { source, limit, page } = req.query;
 
     const parsedLimit = limit ? Number(limit) : DEFAULT_LIMIT;
     if (!Number.isInteger(parsedLimit) || parsedLimit < 1) {
       return res.status(400).json({ error: 'limit must be a positive integer' });
     }
 
+    const parsedPage = page ? Number(page) : 1;
+    if (!Number.isInteger(parsedPage) || parsedPage < 1) {
+      return res.status(400).json({ error: 'page must be a positive integer' });
+    }
+
+    const take = Math.min(parsedLimit, MAX_LIMIT);
+
     const queryOptions: NewsQueryOptions = {
-      orderBy: { pubDate: 'desc' },
-      take: Math.min(parsedLimit, MAX_LIMIT),
+      // Deterministic order (pubDate desc, id desc tiebreaker) so pages don't
+      // shuffle articles that share a pubDate between requests.
+      orderBy: [{ pubDate: 'desc' }, { id: 'desc' }],
+      take,
+      skip: (parsedPage - 1) * take,
     };
 
     if (source) {
@@ -64,7 +87,13 @@ router.get('/', async (req: Request, res: Response) => {
       queryOptions.where = { source: sourceStr };
     }
 
-    const articles = await prisma.article.findMany(queryOptions);
+    const [articles, total] = await Promise.all([
+      prisma.article.findMany(queryOptions),
+      prisma.article.count({ where: queryOptions.where }),
+    ]);
+
+    res.set('X-Total-Count', String(total));
+    res.set('Cache-Control', 'public, max-age=300, s-maxage=300');
     res.json(articles);
   } catch (error) {
     logger.error(error, 'Failed to fetch articles');
@@ -108,6 +137,7 @@ router.get('/:id', async (req: Request, res: Response) => {
     });
 
     if (!article) return res.status(404).json({ error: 'Article not found' });
+    res.set('Cache-Control', 'public, max-age=3600, s-maxage=3600');
     res.json(article);
   } catch (error) {
     logger.error(error, 'Failed to fetch article');
