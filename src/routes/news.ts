@@ -47,8 +47,8 @@ router.get('/', async (req: Request, res: Response) => {
     const { source, limit } = req.query;
 
     const parsedLimit = limit ? Number(limit) : DEFAULT_LIMIT;
-    if (isNaN(parsedLimit) || parsedLimit < 1) {
-      return res.status(400).json({ error: 'limit must be a positive number' });
+    if (!Number.isInteger(parsedLimit) || parsedLimit < 1) {
+      return res.status(400).json({ error: 'limit must be a positive integer' });
     }
 
     const queryOptions: NewsQueryOptions = {
@@ -99,8 +99,8 @@ router.get('/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const articleId = Number(id);
-    if (isNaN(articleId)) {
-      return res.status(400).json({ error: 'id must be a number' });
+    if (!Number.isInteger(articleId) || articleId < 1) {
+      return res.status(400).json({ error: 'id must be a positive integer' });
     }
 
     const article = await prisma.article.findUnique({

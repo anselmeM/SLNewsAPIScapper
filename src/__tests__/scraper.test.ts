@@ -4,7 +4,7 @@ vi.mock('../db.js', () => ({
   prisma: {
     article: {
       count: vi.fn(),
-      findMany: vi.fn(),
+      findMany: vi.fn().mockResolvedValue([]),
       findUnique: vi.fn(),
       create: vi.fn(),
       update: vi.fn(),
@@ -90,5 +90,23 @@ describe('runSierraLeoneIngestion', () => {
 
     const { runSierraLeoneIngestion } = await import('../services/scraper.js');
     await expect(runSierraLeoneIngestion()).resolves.not.toThrow();
+  });
+});
+
+describe('parseSitemapUrls', () => {
+  it('extracts loc URLs from sitemap XML', async () => {
+    const { parseSitemapUrls } = await import('../services/scraper.js');
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+      <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+        <url><loc>https://example.com/a</loc></url>
+        <url><loc>https://example.com/b</loc></url>
+        <url><loc>   </loc></url>
+      </urlset>`;
+    expect(parseSitemapUrls(xml)).toEqual(['https://example.com/a', 'https://example.com/b']);
+  });
+
+  it('returns an empty array for XML without URLs', async () => {
+    const { parseSitemapUrls } = await import('../services/scraper.js');
+    expect(parseSitemapUrls('<urlset></urlset>')).toEqual([]);
   });
 });

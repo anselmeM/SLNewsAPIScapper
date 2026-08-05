@@ -101,6 +101,12 @@ describe('GET /api/news', () => {
     expect(res.body.error).toContain('limit');
   });
 
+  it('returns 400 for fractional limit', async () => {
+    const res = await app.get('/api/news?limit=1.5').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('limit');
+  });
+
   it('returns 400 for invalid source', async () => {
     const res = await app.get('/api/news?source=InvalidSource').set('Authorization', 'Bearer test-key-123');
     expect(res.status).toBe(400);
@@ -111,6 +117,12 @@ describe('GET /api/news', () => {
 describe('GET /api/news/:id', () => {
   it('returns 400 for non-numeric id', async () => {
     const res = await app.get('/api/news/abc').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('id');
+  });
+
+  it('returns 400 for fractional id', async () => {
+    const res = await app.get('/api/news/1.5').set('Authorization', 'Bearer test-key-123');
     expect(res.status).toBe(400);
     expect(res.body.error).toContain('id');
   });

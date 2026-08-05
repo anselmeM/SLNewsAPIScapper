@@ -261,77 +261,121 @@ export async function runSierraLeoneIngestion() {
 
 /**
  * Scrape the WordPress sitemap for article URLs that may have been missed by the RSS feed.
- * The Telegraph RSS only returns ~10 items. The sitemap has the full archive.
+ * The Telegraph RSS only returns ~10 items; the sitemap has the full archive, split across
+ * numbered pages (newest-first). We walk every page and ingest anything not yet in the DB,
+ * up to a per-run cap, so older articles are gradually backfilled instead of being starved
+ * by always re-scanning the same newest-50 window.
  */
+const TELEGRAPH_SITEMAP_BASE = 'https://www.thesierraleonetelegraph.com/wp-sitemap-posts-post-';
+const SITEMAP_MAX_PAGES = 20; // Hard safety cap on pagination
+const SITEMAP_MAX_INGEST_PER_RUN = 50; // Politeness cap per run
+
+export function parseSitemapUrls(xml: string): string[] {
+  const $ = cheerio.load(xml, { xmlMode: true });
+  const urls: string[] = [];
+  $('url loc').each((_, el) => {
+    const url = $(el).text().trim();
+    if (url) urls.push(url);
+  });
+  return urls;
+}
+
 async function scrapeTelegraphFromSitemap(): Promise<void> {
+  let ingested = 0;
+
   try {
-    // Parse the sitemap index
-    const indexResp = await axios.get('https://www.thesierraleonetelegraph.com/wp-sitemap-posts-post-1.xml', {
-      timeout: 15000,
-      headers: { 'User-Agent': USER_AGENT },
-    });
-    const $ = cheerio.load(indexResp.data, { xmlMode: true });
-    const urls: string[] = [];
-    $('url loc').each((_, el) => {
-      const url = $(el).text().trim();
-      if (url) urls.push(url);
-    });
+    // Load every link we already have for this source in one query so dedup is O(1)
+    // instead of a findUnique per sitemap URL.
+    const existingLinks = new Set(
+      (
+        await prisma.article.findMany({
+          where: { source: 'The Sierra Leone Telegraph' },
+          select: { link: true },
+        })
+      ).map((a) => a.link),
+    );
 
-    if (urls.length === 0) {
-      logger.warn('Sitemap scrape returned no URLs');
-      return;
-    }
+    for (let page = 1; page <= SITEMAP_MAX_PAGES; page++) {
+      const sitemapUrl = `${TELEGRAPH_SITEMAP_BASE}${page}.xml`;
 
-    logger.info({ totalUrls: urls.length }, 'Sitemap scrape found URLs');
-
-    // Check each URL against existing articles, ingest if new
-    let ingested = 0;
-    for (const url of urls.slice(0, 50)) { // Limit to 50 per run
-      const existing = await prisma.article.findUnique({ where: { link: url } });
-      if (existing) continue;
-
+      let urls: string[];
       try {
-        const pageResp = await axios.get(url, {
-          timeout: 10000,
+        const resp = await axios.get(sitemapUrl, {
+          timeout: 15000,
           headers: { 'User-Agent': USER_AGENT },
         });
-        const page$ = cheerio.load(pageResp.data);
-        const title = page$('meta[property="og:title"]').attr('content')
-          || page$('title').text().trim() || 'Untitled';
-        const description = page$('meta[property="og:description"]').attr('content')
-          || page$('meta[name="description"]').attr('content') || '';
-        const imageUrl = page$('meta[property="og:image"]').attr('content') || null;
-        const author = page$('meta[property="article:author"]').attr('content')
-          || page$('.entry-author a').text().trim() || 'The Sierra Leone Telegraph';
-        const pubDateStr = page$('meta[property="article:published_time"]').attr('content')
-          || page$('time.entry-date').attr('datetime') || '';
-        const paragraphs: string[] = [];
-        page$('.entry-content p, .entry-content h2').each((_, el) => {
-          const text = page$(el).text().trim();
-          if (text && text.length > 40) paragraphs.push(text);
-        });
+        urls = parseSitemapUrls(resp.data);
+      } catch (err) {
+        // 404 or network error on a numbered page means the sitemap ends here
+        logger.warn({ page, err }, 'Sitemap page fetch failed; assuming end of sitemap');
+        break;
+      }
 
-        await prisma.article.create({
-          data: {
-            title: title.slice(0, 500),
-            link: url,
-            pubDate: pubDateStr ? new Date(pubDateStr) : new Date(),
-            author: author.slice(0, 200),
-            description: description.slice(0, 500),
-            category: [],
-            imageUrl,
-            paragraphs: paragraphs.length > 0 ? paragraphs : [description.slice(0, 500) || title],
-            source: 'The Sierra Leone Telegraph',
-          },
-        });
-        ingested++;
-        await new Promise((resolve) => setTimeout(resolve, 1500)); // Rate limit
-      } catch (itemErr) {
-        logger.warn({ url, error: itemErr }, 'Sitemap item scrape failed');
+      if (urls.length === 0) {
+        logger.info({ page }, 'Sitemap page has no URLs; reached end of sitemap');
+        break;
+      }
+
+      logger.info({ page, totalUrls: urls.length }, 'Sitemap page found URLs');
+
+      for (const url of urls) {
+        if (ingested >= SITEMAP_MAX_INGEST_PER_RUN) {
+          logger.info({ ingested }, 'Sitemap ingest cap reached; remaining articles will be picked up on later runs');
+          return;
+        }
+
+        if (existingLinks.has(url)) continue;
+
+        try {
+          const pageResp = await axios.get(url, {
+            timeout: 10000,
+            headers: { 'User-Agent': USER_AGENT },
+          });
+          const page$ = cheerio.load(pageResp.data);
+          const title =
+            page$('meta[property="og:title"]').attr('content') || page$('title').text().trim() || 'Untitled';
+          const description =
+            page$('meta[property="og:description"]').attr('content') ||
+            page$('meta[name="description"]').attr('content') ||
+            '';
+          const imageUrl = page$('meta[property="og:image"]').attr('content') || null;
+          const author =
+            page$('meta[property="article:author"]').attr('content') ||
+            page$('.entry-author a').text().trim() ||
+            'The Sierra Leone Telegraph';
+          const pubDateStr =
+            page$('meta[property="article:published_time"]').attr('content') ||
+            page$('time.entry-date').attr('datetime') ||
+            '';
+          const paragraphs: string[] = [];
+          page$('.entry-content p, .entry-content h2').each((_, el) => {
+            const text = page$(el).text().trim();
+            if (text && text.length > 40) paragraphs.push(text);
+          });
+
+          await prisma.article.create({
+            data: {
+              title: title.slice(0, 500),
+              link: url,
+              pubDate: pubDateStr ? new Date(pubDateStr) : new Date(),
+              author: author.slice(0, 200),
+              description: description.slice(0, 500),
+              category: [],
+              imageUrl,
+              paragraphs: paragraphs.length > 0 ? paragraphs : [description.slice(0, 500) || title],
+              source: 'The Sierra Leone Telegraph',
+            },
+          });
+          existingLinks.add(url); // keep in-memory dedup in sync
+          ingested++;
+          await new Promise((resolve) => setTimeout(resolve, 1500)); // Rate limit
+        } catch (itemErr) {
+          logger.warn({ url, error: itemErr }, 'Sitemap item scrape failed');
+        }
       }
     }
 
-    logger.info({ ingested, total: urls.length }, 'Sitemap scrape complete');
+    logger.info({ ingested }, 'Sitemap scrape complete');
   } catch (err) {
     logger.error({ err }, 'Sitemap scrape failed');
   }
