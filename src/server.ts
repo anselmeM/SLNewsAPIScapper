@@ -20,6 +20,10 @@ app.use(express.json());
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
+  // Health checks must never be throttled: Render probes /api/health every
+  // ~10s, and a busy API consumer could otherwise trip the limit and take the
+  // health check (and thus the whole service) down with it.
+  skip: (req) => req.originalUrl.split('?')[0] === '/api/health',
   message: { error: 'Too many requests, please try again later' },
   standardHeaders: true,
   legacyHeaders: false,

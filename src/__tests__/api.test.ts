@@ -146,9 +146,17 @@ describe('GET /api/news/:id', () => {
 });
 
 describe('Rate limiting', () => {
-  it('includes rate limit headers', async () => {
-    const res = await app.get('/api/health');
+  it('applies rate limit headers to API endpoints', async () => {
+    const res = await app.get('/api/news');
+    expect(res.status).toBe(401); // limiter runs before the API key check
     expect(res.headers['ratelimit-limit']).toBeDefined();
+  });
+
+  it('does not rate limit the health endpoint', async () => {
+    (prisma.$queryRaw as ReturnType<typeof vi.fn>).mockResolvedValueOnce([{ '?column?': 1 }]);
+    const res = await app.get('/api/health');
+    expect(res.status).toBe(200);
+    expect(res.headers['ratelimit-limit']).toBeUndefined();
   });
 });
 
