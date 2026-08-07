@@ -1,0 +1,18 @@
+#!/bin/sh
+set -e
+
+# 1) Block direct pushes to the default branch — work happens on feature
+#    branches and lands via PR. Bypass only with --no-verify when truly intended.
+while read local_ref local_sha remote_ref remote_sha; do
+  case "$remote_ref" in
+    refs/heads/master|refs/heads/main)
+      echo "❌ Direct push to ${remote_ref#refs/heads/} is not allowed."
+      echo "   Create a feature branch, push it, and open a PR."
+      echo "   (If this is genuinely intended, use: git push --no-verify)"
+      exit 1
+      ;;
+  esac
+done
+
+# 2) Run the test suite before anything reaches the remote.
+npm test
