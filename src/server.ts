@@ -6,6 +6,7 @@ import rateLimit from 'express-rate-limit';
 import swaggerUi from 'swagger-ui-express';
 import pinoHttp from 'pino-http';
 import newsRouter from './routes/news.js';
+import v1Router from './routes/v1.js';
 import { prisma } from './db.js';
 import { swaggerSpec } from './config/swagger.js';
 import logger from './logger.js';
@@ -34,7 +35,7 @@ const limiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 });
-app.use('/api', limiter);
+app.use(['/api', '/v1'], limiter);
 
 const API_KEY = process.env.API_KEY;
 
@@ -68,7 +69,7 @@ app.get('/', (_req, res) => {
   });
 });
 
-app.use('/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+app.use(['/docs', '/v1/docs'], swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
 app.get('/api/health', async (_req, res) => {
   res.set('Cache-Control', 'no-store');
@@ -81,6 +82,11 @@ app.get('/api/health', async (_req, res) => {
 });
 
 app.use('/api/news', requireApiKey, newsRouter);
+
+// Versioned business-facing contract (Phase 1). The SLNews app's scraper
+// client calls /v1/news first and falls back to /api/news until this exists;
+// ship /v1 and the app upgrades automatically.
+app.use('/v1/news', requireApiKey, v1Router);
 
 // JSON 404 for unknown routes (Express's default is an HTML "Cannot GET" page)
 app.use((_req, res) => {

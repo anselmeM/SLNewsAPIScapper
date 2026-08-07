@@ -207,6 +207,149 @@ describe('Unknown routes', () => {
   });
 });
 
+describe('Versioned API v1', () => {
+  // The db mock bypasses Prisma's select, so strip paragraphs to emulate what
+  // the metadata-only select returns.
+  const metaOnlyArticles = mockArticles.map(({ paragraphs: _paragraphs, ...rest }) => rest);
+
+  it('returns the contract envelope { data, meta } with a valid key', async () => {
+    const mockFindMany = prisma.article.findMany as ReturnType<typeof vi.fn>;
+    mockFindMany.mockResolvedValueOnce(metaOnlyArticles);
+
+    const res = await app.get('/v1/news').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(1);
+    expect(res.body.data[0]).toEqual({
+      id: 1,
+      title: 'Test Article',
+      summary: 'A test article description',
+      source: 'Politico SL',
+      category: ['Politics'],
+      url: 'https://example.com/article-1',
+      published_at: '2025-01-01T00:00:00.000Z',
+    });
+    expect(res.body.meta).toEqual({ page: 1, page_size: 20, total: 1, has_more: false });
+  });
+
+  it('never exposes full article text (link + summary model)', async () => {
+    const mockFindMany = prisma.article.findMany as ReturnType<typeof vi.fn>;
+    mockFindMany.mockResolvedValueOnce(metaOnlyArticles);
+
+    const res = await app.get('/v1/news').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].paragraphs).toBeUndefined();
+    // and the DB query itself must not request paragraphs
+    expect(mockFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({ select: expect.not.objectContaining({ paragraphs: true }) }),
+    );
+  });
+
+  it('requires an API key', async () => {
+    const res = await app.get('/v1/news');
+    expect(res.status).toBe(401);
+    expect(res.body.error).toContain('Unauthorized');
+  });
+
+  it('passes pagination params and reports has_more', async () => {
+    const mockFindMany = prisma.article.findMany as ReturnType<typeof vi.fn>;
+    mockFindMany.mockResolvedValueOnce(mockArticles);
+
+    const res = await app.get('/v1/news?page_size=10&page=2').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(200);
+    expect(mockFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({ take: 10, skip: 10, orderBy: [{ pubDate: 'desc' }, { id: 'desc' }] }),
+    );
+    expect(res.body.meta).toEqual({ page: 2, page_size: 10, total: 1, has_more: false });
+  });
+
+  it('accepts limit as an alias for page_size', async () => {
+    const mockFindMany = prisma.article.findMany as ReturnType<typeof vi.fn>;
+    mockFindMany.mockResolvedValueOnce(mockArticles);
+
+    const res = await app.get('/v1/news?limit=5').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(200);
+    expect(res.body.meta.page_size).toBe(5);
+  });
+
+  it('returns 400 for invalid page_size', async () => {
+    const res = await app.get('/v1/news?page_size=0').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('page_size');
+  });
+
+  it('returns 400 for page_size above the max', async () => {
+    const res = await app.get('/v1/news?page_size=101').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('page_size');
+  });
+
+  it('returns 400 for invalid page', async () => {
+    const res = await app.get('/v1/news?page=1.5').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('page');
+  });
+
+  it('returns 400 for an invalid source', async () => {
+    const res = await app.get('/v1/news?source=Unknown').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('source');
+  });
+
+  it('filters by category (repeated params and comma-separated)', async () => {
+    const mockFindMany = prisma.article.findMany as ReturnType<typeof vi.fn>;
+    mockFindMany.mockResolvedValueOnce(mockArticles);
+
+    const res = await app
+      .get('/v1/news?category=politics&category=economy')
+      .set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(200);
+    expect(mockFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ category: { hasSome: ['politics', 'economy'] } }) }),
+    );
+  });
+
+  it('filters by published date window', async () => {
+    const mockFindMany = prisma.article.findMany as ReturnType<typeof vi.fn>;
+    mockFindMany.mockResolvedValueOnce(mockArticles);
+
+    const res = await app.get('/v1/news?from=2026-08-01&to=2026-08-07').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(200);
+    expect(mockFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          pubDate: { gte: new Date('2026-08-01'), lte: new Date('2026-08-07T23:59:59.999Z') },
+        }),
+      }),
+    );
+  });
+
+  it('returns 400 for a page beyond the cap', async () => {
+    const res = await app.get('/v1/news?page=10001').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('page');
+  });
+
+  it('returns 400 for an invalid date range', async () => {
+    const res = await app.get('/v1/news?from=not-a-date').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('from');
+  });
+
+  it('returns 400 when from is after to', async () => {
+    const res = await app.get('/v1/news?from=2026-08-07&to=2026-08-01').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('from');
+  });
+
+  it('sets cache headers', async () => {
+    const mockFindMany = prisma.article.findMany as ReturnType<typeof vi.fn>;
+    mockFindMany.mockResolvedValueOnce(mockArticles);
+
+    const res = await app.get('/v1/news').set('Authorization', 'Bearer test-key-123');
+    expect(res.headers['cache-control']).toContain('public');
+  });
+});
+
 describe('Rate limiting', () => {
   it('applies rate limit headers to API endpoints', async () => {
     const res = await app.get('/api/news');
