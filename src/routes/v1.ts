@@ -9,7 +9,23 @@ const VALID_SOURCES = SIERRA_LEONE_SOURCES.map((s) => s.name);
 const MAX_LIMIT = 100;
 const DEFAULT_LIMIT = 20;
 
+// The sellable contract is metadata + summary only (link + summary model):
+// headline, summary, source, pub date, image, and the link back to the
+// publisher. Full article text (paragraphs) is never exposed to API customers.
+const ARTICLE_META_SELECT = {
+  id: true,
+  title: true,
+  description: true,
+  author: true,
+  category: true,
+  imageUrl: true,
+  pubDate: true,
+  source: true,
+  link: true,
+} as const;
+
 interface V1QueryOptions {
+  select: typeof ARTICLE_META_SELECT;
   orderBy: Array<{ pubDate: 'desc' } | { id: 'desc' }>;
   take: number;
   skip?: number;
@@ -56,8 +72,32 @@ interface V1QueryOptions {
  *               properties:
  *                 data:
  *                   type: array
+ *                   description: Article metadata only (link + summary model — full text is never exposed)
  *                   items:
  *                     type: object
+ *                     properties:
+ *                       id:
+ *                         type: integer
+ *                       title:
+ *                         type: string
+ *                       description:
+ *                         type: string
+ *                       author:
+ *                         type: string
+ *                       category:
+ *                         type: array
+ *                         items:
+ *                           type: string
+ *                       imageUrl:
+ *                         type: string
+ *                         nullable: true
+ *                       pubDate:
+ *                         type: string
+ *                         format: date-time
+ *                       source:
+ *                         type: string
+ *                       link:
+ *                         type: string
  *                 meta:
  *                   type: object
  *                   required: [page, limit, total, totalPages]
@@ -96,6 +136,7 @@ router.get('/', async (req: Request, res: Response) => {
     const queryOptions: V1QueryOptions = {
       // Deterministic order (pubDate desc, id desc tiebreaker) so pages don't
       // shuffle articles that share a pubDate between requests.
+      select: ARTICLE_META_SELECT,
       orderBy: [{ pubDate: 'desc' }, { id: 'desc' }],
       take,
       skip: (parsedPage - 1) * take,

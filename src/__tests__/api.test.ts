@@ -208,15 +208,32 @@ describe('Unknown routes', () => {
 });
 
 describe('Versioned API v1', () => {
+  // The db mock bypasses Prisma's select, so strip paragraphs to emulate what
+  // the metadata-only select returns.
+  const metaOnlyArticles = mockArticles.map(({ paragraphs: _paragraphs, ...rest }) => rest);
+
   it('returns a { data, meta } envelope with a valid key', async () => {
     const mockFindMany = prisma.article.findMany as ReturnType<typeof vi.fn>;
-    mockFindMany.mockResolvedValueOnce(mockArticles);
+    mockFindMany.mockResolvedValueOnce(metaOnlyArticles);
 
     const res = await app.get('/v1/news').set('Authorization', 'Bearer test-key-123');
     expect(res.status).toBe(200);
     expect(res.body.data).toHaveLength(1);
     expect(res.body.data[0].title).toBe('Test Article');
     expect(res.body.meta).toEqual({ page: 1, limit: 20, total: 1, totalPages: 1 });
+  });
+
+  it('never exposes full article text (link + summary model)', async () => {
+    const mockFindMany = prisma.article.findMany as ReturnType<typeof vi.fn>;
+    mockFindMany.mockResolvedValueOnce(metaOnlyArticles);
+
+    const res = await app.get('/v1/news').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].paragraphs).toBeUndefined();
+    // and the DB query itself must not request paragraphs
+    expect(mockFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({ select: expect.not.objectContaining({ paragraphs: true }) }),
+    );
   });
 
   it('requires an API key', async () => {
