@@ -207,6 +207,65 @@ describe('Unknown routes', () => {
   });
 });
 
+describe('Versioned API v1', () => {
+  it('returns a { data, meta } envelope with a valid key', async () => {
+    const mockFindMany = prisma.article.findMany as ReturnType<typeof vi.fn>;
+    mockFindMany.mockResolvedValueOnce(mockArticles);
+
+    const res = await app.get('/v1/news').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(1);
+    expect(res.body.data[0].title).toBe('Test Article');
+    expect(res.body.meta).toEqual({ page: 1, limit: 20, total: 1, totalPages: 1 });
+  });
+
+  it('requires an API key', async () => {
+    const res = await app.get('/v1/news');
+    expect(res.status).toBe(401);
+    expect(res.body.error).toContain('Unauthorized');
+  });
+
+  it('passes pagination params and reports totalPages', async () => {
+    const mockFindMany = prisma.article.findMany as ReturnType<typeof vi.fn>;
+    mockFindMany.mockResolvedValueOnce(mockArticles);
+
+    const res = await app.get('/v1/news?limit=10&page=2').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(200);
+    expect(mockFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({ take: 10, skip: 10, orderBy: [{ pubDate: 'desc' }, { id: 'desc' }] }),
+    );
+    expect(res.body.meta.page).toBe(2);
+    expect(res.body.meta.limit).toBe(10);
+    expect(res.body.meta.totalPages).toBe(1); // count mock resolves 1
+  });
+
+  it('returns 400 for invalid limit', async () => {
+    const res = await app.get('/v1/news?limit=0').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('limit');
+  });
+
+  it('returns 400 for invalid page', async () => {
+    const res = await app.get('/v1/news?page=1.5').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('page');
+  });
+
+  it('returns 400 for an invalid source', async () => {
+    const res = await app.get('/v1/news?source=Unknown').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('source');
+  });
+
+  it('sets cache headers', async () => {
+    const mockFindMany = prisma.article.findMany as ReturnType<typeof vi.fn>;
+    mockFindMany.mockResolvedValueOnce(mockArticles);
+
+    const res = await app.get('/v1/news').set('Authorization', 'Bearer test-key-123');
+    expect(res.headers['cache-control']).toContain('public');
+  });
+});
+
 describe('Rate limiting', () => {
   it('applies rate limit headers to API endpoints', async () => {
     const res = await app.get('/api/news');
