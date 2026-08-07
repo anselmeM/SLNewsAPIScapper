@@ -3,3 +3,13 @@ dist/
 .env
 *.log
 tsconfig.tsbuildinfo
+
+# Local agent/editor state — never commit
+.reasonix/
+reasonix.toml
+
+# Patch for the SLNews app repo (apply there; not part of this repo)
+slnews-app-pin-legacy.patch
+
+# Husky auto-generated hook shims
+.husky/_
