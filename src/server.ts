@@ -69,7 +69,7 @@ app.get('/', (_req, res) => {
   });
 });
 
-app.use('/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+app.use(['/docs', '/v1/docs'], swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
 app.get('/api/health', async (_req, res) => {
   res.set('Cache-Control', 'no-store');
