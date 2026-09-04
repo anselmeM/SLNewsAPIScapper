@@ -10,6 +10,11 @@ vi.mock('../db.js', () => ({
       findUnique: vi.fn(),
       count: vi.fn().mockResolvedValue(1),
     },
+    video: {
+      findMany: vi.fn(),
+      findUnique: vi.fn(),
+      count: vi.fn().mockResolvedValue(0),
+    },
     $queryRaw: vi.fn(),
     $disconnect: vi.fn(),
   },

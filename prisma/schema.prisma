@@ -23,3 +23,21 @@ model Article {
   @@index([source])
   @@index([createdAt])
 }
+
+model Video {
+  id           Int      @id @default(autoincrement())
+  videoId      String   @unique
+  title        String
+  url          String   @unique
+  description  String?
+  thumbnailUrl String?
+  channelId    String
+  channelTitle String
+  publishedAt  DateTime
+  category     String[]
+  createdAt    DateTime @default(now())
+
+  @@index([publishedAt])
+  @@index([channelTitle])
+  @@index([createdAt])
+}

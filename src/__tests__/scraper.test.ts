@@ -10,6 +10,14 @@ vi.mock('../db.js', () => ({
       update: vi.fn(),
       upsert: vi.fn().mockResolvedValue({ id: 1 }),
     },
+    video: {
+      count: vi.fn(),
+      findMany: vi.fn().mockResolvedValue([]),
+      findUnique: vi.fn().mockResolvedValue(null),
+      create: vi.fn(),
+      update: vi.fn(),
+      upsert: vi.fn().mockResolvedValue({ id: 1 }),
+    },
   },
 }));
 

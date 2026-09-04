@@ -7,6 +7,8 @@ import swaggerUi from 'swagger-ui-express';
 import pinoHttp from 'pino-http';
 import newsRouter from './routes/news.js';
 import v1Router from './routes/v1.js';
+import videosRouter from './routes/videos.js';
+import v1VideosRouter from './routes/v1-videos.js';
 import { prisma } from './db.js';
 import { swaggerSpec } from './config/swagger.js';
 import logger from './logger.js';
@@ -63,6 +65,8 @@ app.get('/', (_req, res) => {
     endpoints: {
       news: '/api/news?limit=20&source=<name>',
       article: '/api/news/:id',
+      videos: '/api/videos?limit=20&channel=<name>',
+      video: '/api/videos/:id',
       health: '/api/health',
       docs: '/docs',
     },
@@ -82,11 +86,13 @@ app.get('/api/health', async (_req, res) => {
 });
 
 app.use('/api/news', requireApiKey, newsRouter);
+app.use('/api/videos', requireApiKey, videosRouter);
 
 // Versioned business-facing contract (Phase 1). The SLNews app's scraper
 // client calls /v1/news first and falls back to /api/news until this exists;
 // ship /v1 and the app upgrades automatically.
 app.use('/v1/news', requireApiKey, v1Router);
+app.use('/v1/videos', requireApiKey, v1VideosRouter);
 
 // JSON 404 for unknown routes (Express's default is an HTML "Cannot GET" page)
 app.use((_req, res) => {
@@ -99,18 +105,29 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 });
 
 const PORT = process.env.PORT || 3000;
-const server = app.listen(PORT, () => {
-  logger.info({ port: PORT }, 'Sierra Leone News API started');
-});
+let server: ReturnType<typeof app.listen> | undefined;
+
+if (process.env.NODE_ENV !== 'test') {
+  server = app.listen(PORT, () => {
+    logger.info({ port: PORT }, 'Sierra Leone News API started');
+  });
+}
 
 function shutdown(signal: string) {
   logger.info({ signal }, 'Shutting down gracefully');
-  server.close(() => {
+  if (server) {
+    server.close(() => {
+      prisma.$disconnect().then(() => {
+        logger.info('Server stopped');
+        process.exit(0);
+      });
+    });
+  } else {
     prisma.$disconnect().then(() => {
       logger.info('Server stopped');
       process.exit(0);
     });
-  });
+  }
   setTimeout(() => {
     logger.error('Forced shutdown after timeout');
     process.exit(1);
