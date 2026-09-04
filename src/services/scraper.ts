@@ -3,6 +3,7 @@ import axios, { AxiosRequestConfig, AxiosResponse } from 'axios';
 import * as cheerio from 'cheerio';
 import { prisma } from '../db.js';
 import { SIERRA_LEONE_SOURCES, NewsSourceConfig } from '../config/sources.js';
+import { runSierraLeoneVideoIngestion } from './video-scraper.js';
 import logger from '../logger.js';
 
 const USER_AGENT =
@@ -289,11 +290,18 @@ export async function runSierraLeoneIngestion() {
     }
   }
 
-  logger.info('Ingestion Cycle Complete');
+  logger.info('Article Ingestion Cycle Complete');
 
   // Sitemap fallback: catch articles the RSS feed may have missed
   await scrapeTelegraphFromSitemap();
+
+  // Video feeds: ingest latest video broadcasts & shorts
+  await runSierraLeoneVideoIngestion();
+
+  logger.info('Full Ingestion Cycle Complete');
 }
+
+export { runSierraLeoneVideoIngestion };
 
 /**
  * Scrape the WordPress sitemap for article URLs that may have been missed by the RSS feed.
