@@ -65,6 +65,11 @@ function parsePositiveInt(value: unknown, fallback: number): number {
  *           type: string
  *           format: date
  *         description: Latest published date (ISO)
+ *       - in: query
+ *         name: q
+ *         schema:
+ *           type: string
+ *         description: Search keyword across title, description, and channel (case-insensitive)
  *     responses:
  *       200:
  *         description: Paginated video metadata
@@ -89,7 +94,15 @@ function parsePositiveInt(value: unknown, fallback: number): number {
  */
 router.get('/', async (req: Request, res: Response) => {
   try {
-    const { category, channel, page, page_size, limit, from, to } = req.query;
+    const { category, channel, page, page_size, limit, from, to, q } = req.query;
+
+    let searchTerm: string | undefined;
+    if (q !== undefined) {
+      searchTerm = String(q).trim();
+      if (searchTerm.length > 100) {
+        return res.status(400).json({ error: 'q search term must not exceed 100 characters' });
+      }
+    }
 
     const parsedPageSize = parsePositiveInt(page_size, parsePositiveInt(limit, DEFAULT_PAGE_SIZE));
     if (Number.isNaN(parsedPageSize) || parsedPageSize > MAX_PAGE_SIZE) {
@@ -140,6 +153,14 @@ router.get('/', async (req: Request, res: Response) => {
     if (toDate) publishedAtFilter.lte = toDate;
     if (Object.keys(publishedAtFilter).length > 0) {
       where.publishedAt = publishedAtFilter;
+    }
+
+    if (searchTerm && searchTerm.length > 0) {
+      where.OR = [
+        { title: { contains: searchTerm, mode: 'insensitive' } },
+        { description: { contains: searchTerm, mode: 'insensitive' } },
+        { channelTitle: { contains: searchTerm, mode: 'insensitive' } },
+      ];
     }
 
     const [videos, total] = await Promise.all([

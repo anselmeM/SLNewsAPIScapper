@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
+import compression from 'compression';
 import crypto from 'crypto';
 import rateLimit from 'express-rate-limit';
 import swaggerUi from 'swagger-ui-express';
@@ -9,6 +10,7 @@ import newsRouter from './routes/news.js';
 import v1Router from './routes/v1.js';
 import videosRouter from './routes/videos.js';
 import v1VideosRouter from './routes/v1-videos.js';
+import statsRouter from './routes/stats.js';
 import { prisma } from './db.js';
 import { swaggerSpec } from './config/swagger.js';
 import logger from './logger.js';
@@ -16,6 +18,7 @@ import logger from './logger.js';
 const app = express();
 
 app.use(helmet());
+app.use(compression());
 
 const allowedOrigin = process.env.CORS_ORIGIN || '*';
 app.use(cors({ origin: allowedOrigin }));
@@ -63,10 +66,11 @@ app.get('/', (_req, res) => {
     name: 'Sierra Leone News API',
     auth: API_KEY ? 'Requires Authorization: Bearer <key>' : 'API key not configured on server',
     endpoints: {
-      news: '/api/news?limit=20&source=<name>',
+      news: '/api/news?limit=20&source=<name>&q=<term>',
       article: '/api/news/:id',
-      videos: '/api/videos?limit=20&channel=<name>',
+      videos: '/api/videos?limit=20&channel=<name>&q=<term>',
       video: '/api/videos/:id',
+      stats: '/api/stats',
       health: '/api/health',
       docs: '/docs',
     },
@@ -87,6 +91,7 @@ app.get('/api/health', async (_req, res) => {
 
 app.use('/api/news', requireApiKey, newsRouter);
 app.use('/api/videos', requireApiKey, videosRouter);
+app.use(['/api/stats', '/v1/stats'], requireApiKey, statsRouter);
 
 // Versioned business-facing contract (Phase 1). The SLNews app's scraper
 // client calls /v1/news first and falls back to /api/news until this exists;

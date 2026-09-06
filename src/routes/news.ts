@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import type { Prisma } from '@prisma/client';
 import { prisma } from '../db.js';
 import { SIERRA_LEONE_SOURCES } from '../config/sources.js';
 import logger from '../logger.js';
@@ -13,7 +14,7 @@ interface NewsQueryOptions {
   orderBy: Array<{ pubDate: 'desc' } | { id: 'desc' }>;
   take: number;
   skip?: number;
-  where?: { source: string };
+  where?: Prisma.ArticleWhereInput;
 }
 
 /**
@@ -42,6 +43,11 @@ interface NewsQueryOptions {
  *         name: source
  *         schema:
  *           type: string
+ *       - in: query
+ *         name: q
+ *         schema:
+ *           type: string
+ *         description: Search keyword across title and description (case-insensitive)
  *     responses:
  *       200:
  *         description: Paginated list of articles
@@ -57,7 +63,7 @@ interface NewsQueryOptions {
  */
 router.get('/', async (req: Request, res: Response) => {
   try {
-    const { source, limit, page } = req.query;
+    const { source, limit, page, q } = req.query;
 
     const parsedLimit = limit ? Number(limit) : DEFAULT_LIMIT;
     if (!Number.isInteger(parsedLimit) || parsedLimit < 1) {
@@ -69,7 +75,32 @@ router.get('/', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'page must be a positive integer' });
     }
 
+    let searchTerm: string | undefined;
+    if (q !== undefined) {
+      searchTerm = String(q).trim();
+      if (searchTerm.length > 100) {
+        return res.status(400).json({ error: 'q search term must not exceed 100 characters' });
+      }
+    }
+
     const take = Math.min(parsedLimit, MAX_LIMIT);
+
+    const where: Prisma.ArticleWhereInput = {};
+
+    if (source) {
+      const sourceStr = String(source);
+      if (!VALID_SOURCES.includes(sourceStr)) {
+        return res.status(400).json({ error: `Invalid source. Must be one of: ${VALID_SOURCES.join(', ')}` });
+      }
+      where.source = sourceStr;
+    }
+
+    if (searchTerm && searchTerm.length > 0) {
+      where.OR = [
+        { title: { contains: searchTerm, mode: 'insensitive' } },
+        { description: { contains: searchTerm, mode: 'insensitive' } },
+      ];
+    }
 
     const queryOptions: NewsQueryOptions = {
       // Deterministic order (pubDate desc, id desc tiebreaker) so pages don't
@@ -77,15 +108,8 @@ router.get('/', async (req: Request, res: Response) => {
       orderBy: [{ pubDate: 'desc' }, { id: 'desc' }],
       take,
       skip: (parsedPage - 1) * take,
+      where: Object.keys(where).length > 0 ? where : undefined,
     };
-
-    if (source) {
-      const sourceStr = String(source);
-      if (!VALID_SOURCES.includes(sourceStr)) {
-        return res.status(400).json({ error: `Invalid source. Must be one of: ${VALID_SOURCES.join(', ')}` });
-      }
-      queryOptions.where = { source: sourceStr };
-    }
 
     const [articles, total] = await Promise.all([
       prisma.article.findMany(queryOptions),

@@ -8,11 +8,15 @@ vi.mock('../db.js', () => ({
     article: {
       findMany: vi.fn(),
       findUnique: vi.fn(),
+      findFirst: vi.fn(),
+      groupBy: vi.fn(),
       count: vi.fn().mockResolvedValue(1),
     },
     video: {
       findMany: vi.fn(),
       findUnique: vi.fn(),
+      findFirst: vi.fn(),
+      groupBy: vi.fn(),
       count: vi.fn().mockResolvedValue(0),
     },
     $queryRaw: vi.fn(),
@@ -160,6 +164,31 @@ describe('GET /api/news', () => {
     const res = await app.get('/api/news?source=InvalidSource').set('Authorization', 'Bearer test-key-123');
     expect(res.status).toBe(400);
     expect(res.body.error).toContain('Invalid source');
+  });
+
+  it('filters articles by search query q', async () => {
+    const mockFindMany = prisma.article.findMany as ReturnType<typeof vi.fn>;
+    mockFindMany.mockResolvedValueOnce(mockArticles);
+
+    const res = await app.get('/api/news?q=politics').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(200);
+    expect(mockFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          OR: [
+            { title: { contains: 'politics', mode: 'insensitive' } },
+            { description: { contains: 'politics', mode: 'insensitive' } },
+          ],
+        }),
+      }),
+    );
+  });
+
+  it('returns 400 when search query q exceeds 100 characters', async () => {
+    const longQuery = 'a'.repeat(101);
+    const res = await app.get(`/api/news?q=${longQuery}`).set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('100 characters');
   });
 });
 
@@ -352,6 +381,24 @@ describe('Versioned API v1', () => {
 
     const res = await app.get('/v1/news').set('Authorization', 'Bearer test-key-123');
     expect(res.headers['cache-control']).toContain('public');
+  });
+
+  it('filters articles by search query q in v1 contract', async () => {
+    const mockFindMany = prisma.article.findMany as ReturnType<typeof vi.fn>;
+    mockFindMany.mockResolvedValueOnce(mockArticles);
+
+    const res = await app.get('/v1/news?q=economy').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(200);
+    expect(mockFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          OR: [
+            { title: { contains: 'economy', mode: 'insensitive' } },
+            { description: { contains: 'economy', mode: 'insensitive' } },
+          ],
+        }),
+      }),
+    );
   });
 });
 

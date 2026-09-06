@@ -2,6 +2,7 @@ import * as cheerio from 'cheerio';
 import axios, { AxiosRequestConfig, AxiosResponse } from 'axios';
 import { prisma } from '../db.js';
 import { SIERRA_LEONE_VIDEO_SOURCES, VideoSourceConfig, getYouTubeFeedUrl } from '../config/video-sources.js';
+import { normalizeArticleUrl } from '../utils/url.js';
 import logger from '../logger.js';
 
 const USER_AGENT =
@@ -79,7 +80,7 @@ export function parseYouTubeAtomFeed(xml: string, defaultCategory: string[] = []
     videos.push({
       videoId,
       title: title.slice(0, 500),
-      url: linkHref,
+      url: normalizeArticleUrl(linkHref),
       description: description ? description.slice(0, 2000) : null,
       thumbnailUrl: thumbnail,
       channelId,

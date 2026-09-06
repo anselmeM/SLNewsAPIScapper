@@ -8,11 +8,15 @@ vi.mock('../db.js', () => ({
     article: {
       findMany: vi.fn(),
       findUnique: vi.fn(),
+      findFirst: vi.fn(),
+      groupBy: vi.fn(),
       count: vi.fn().mockResolvedValue(0),
     },
     video: {
       findMany: vi.fn(),
       findUnique: vi.fn(),
+      findFirst: vi.fn(),
+      groupBy: vi.fn(),
       count: vi.fn().mockResolvedValue(1),
     },
     $queryRaw: vi.fn(),
@@ -102,6 +106,32 @@ describe('GET /api/videos', () => {
     const res2 = await app.get('/api/videos?page=abc').set('Authorization', 'Bearer test-key-123');
     expect(res2.status).toBe(400);
   });
+
+  it('filters videos by search term q', async () => {
+    (prisma.video.findMany as ReturnType<typeof vi.fn>).mockResolvedValueOnce(mockVideos);
+    (prisma.video.count as ReturnType<typeof vi.fn>).mockResolvedValueOnce(1);
+
+    const res = await app.get('/api/videos?q=port').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(200);
+    expect(prisma.video.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          OR: [
+            { title: { contains: 'port', mode: 'insensitive' } },
+            { description: { contains: 'port', mode: 'insensitive' } },
+            { channelTitle: { contains: 'port', mode: 'insensitive' } },
+          ],
+        }),
+      }),
+    );
+  });
+
+  it('returns 400 when search query q exceeds 100 characters', async () => {
+    const longQuery = 'b'.repeat(101);
+    const res = await app.get(`/api/videos?q=${longQuery}`).set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('100 characters');
+  });
 });
 
 describe('GET /api/videos/:id', () => {
@@ -179,5 +209,24 @@ describe('GET /v1/videos', () => {
   it('rejects page_size greater than 100', async () => {
     const res = await app.get('/v1/videos?page_size=150').set('Authorization', 'Bearer test-key-123');
     expect(res.status).toBe(400);
+  });
+
+  it('filters videos by search term q in v1 contract', async () => {
+    (prisma.video.findMany as ReturnType<typeof vi.fn>).mockResolvedValueOnce(mockVideos);
+    (prisma.video.count as ReturnType<typeof vi.fn>).mockResolvedValueOnce(1);
+
+    const res = await app.get('/v1/videos?q=AYV').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(200);
+    expect(prisma.video.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          OR: [
+            { title: { contains: 'AYV', mode: 'insensitive' } },
+            { description: { contains: 'AYV', mode: 'insensitive' } },
+            { channelTitle: { contains: 'AYV', mode: 'insensitive' } },
+          ],
+        }),
+      }),
+    );
   });
 });
