@@ -4,6 +4,7 @@ import * as cheerio from 'cheerio';
 import { prisma } from '../db.js';
 import { SIERRA_LEONE_SOURCES, NewsSourceConfig } from '../config/sources.js';
 import { runSierraLeoneVideoIngestion } from './video-scraper.js';
+import { normalizeArticleUrl } from '../utils/url.js';
 import logger from '../logger.js';
 
 const USER_AGENT =
@@ -71,21 +72,24 @@ function safeParseDate(dateStr?: string): Date {
 }
 
 function extractRealLink(rawLink: string): string {
-  if (!rawLink.includes('%3C') && !rawLink.includes('<')) return rawLink;
-  try {
-    const decoded = decodeURIComponent(rawLink);
-    const match = decoded.match(/href="([^"]+)"/);
-    if (match) {
-      const href = match[1];
-      if (href.startsWith('/')) {
-        return new URL(rawLink).origin + href;
+  let link = rawLink;
+  if (rawLink.includes('%3C') || rawLink.includes('<')) {
+    try {
+      const decoded = decodeURIComponent(rawLink);
+      const match = decoded.match(/href="([^"]+)"/);
+      if (match) {
+        const href = match[1];
+        if (href.startsWith('/')) {
+          link = new URL(rawLink).origin + href;
+        } else {
+          link = href;
+        }
       }
-      return href;
+    } catch {
+      // fall through to raw link
     }
-  } catch {
-    // fall through to raw link
   }
-  return rawLink;
+  return normalizeArticleUrl(link);
 }
 
 function paragraphsFromHtml(html: string): string[] {
@@ -362,12 +366,13 @@ async function scrapeTelegraphFromSitemap(): Promise<void> {
 
       logger.info({ page, totalUrls: urls.length }, 'Sitemap page found URLs');
 
-      for (const url of urls) {
+      for (const rawUrl of urls) {
         if (ingested >= SITEMAP_MAX_INGEST_PER_RUN) {
           logger.info({ ingested }, 'Sitemap ingest cap reached; remaining articles will be picked up on later runs');
           return;
         }
 
+        const url = normalizeArticleUrl(rawUrl);
         if (existingLinks.has(url)) continue;
 
         try {

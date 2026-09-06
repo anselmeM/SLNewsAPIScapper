@@ -48,6 +48,11 @@ interface VideoQueryOptions {
  *         schema:
  *           type: string
  *         description: Filter by category (comma-separated or single)
+ *       - in: query
+ *         name: q
+ *         schema:
+ *           type: string
+ *         description: Search keyword across title, description, and channel (case-insensitive)
  *     responses:
  *       200:
  *         description: Paginated list of videos
@@ -62,7 +67,7 @@ interface VideoQueryOptions {
  */
 router.get('/', async (req: Request, res: Response) => {
   try {
-    const { channel, category, limit, page } = req.query;
+    const { channel, category, limit, page, q } = req.query;
 
     const parsedLimit = limit ? Number(limit) : DEFAULT_LIMIT;
     if (!Number.isInteger(parsedLimit) || parsedLimit < 1) {
@@ -74,11 +79,27 @@ router.get('/', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'page must be a positive integer' });
     }
 
+    let searchTerm: string | undefined;
+    if (q !== undefined) {
+      searchTerm = String(q).trim();
+      if (searchTerm.length > 100) {
+        return res.status(400).json({ error: 'q search term must not exceed 100 characters' });
+      }
+    }
+
     const take = Math.min(parsedLimit, MAX_LIMIT);
     const where: Prisma.VideoWhereInput = {};
 
     if (channel) {
       where.channelTitle = { contains: String(channel), mode: 'insensitive' };
+    }
+
+    if (searchTerm && searchTerm.length > 0) {
+      where.OR = [
+        { title: { contains: searchTerm, mode: 'insensitive' } },
+        { description: { contains: searchTerm, mode: 'insensitive' } },
+        { channelTitle: { contains: searchTerm, mode: 'insensitive' } },
+      ];
     }
 
     if (category) {

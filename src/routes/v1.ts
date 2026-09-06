@@ -91,6 +91,11 @@ function parsePositiveInt(value: unknown, fallback: number): number {
  *           type: string
  *           format: date
  *         description: Latest published date (ISO) to include
+ *       - in: query
+ *         name: q
+ *         schema:
+ *           type: string
+ *         description: Search keyword across headline and summary (case-insensitive)
  *     responses:
  *       200:
  *         description: Paginated article metadata
@@ -149,7 +154,15 @@ function parsePositiveInt(value: unknown, fallback: number): number {
  */
 router.get('/', async (req: Request, res: Response) => {
   try {
-    const { category, source, page, page_size, limit, from, to } = req.query;
+    const { category, source, page, page_size, limit, from, to, q } = req.query;
+
+    let searchTerm: string | undefined;
+    if (q !== undefined) {
+      searchTerm = String(q).trim();
+      if (searchTerm.length > 100) {
+        return res.status(400).json({ error: 'q search term must not exceed 100 characters' });
+      }
+    }
 
     // page_size is the contract param; limit is accepted as a legacy alias.
     const parsedPageSize = parsePositiveInt(page_size, parsePositiveInt(limit, DEFAULT_PAGE_SIZE));
@@ -208,6 +221,13 @@ router.get('/', async (req: Request, res: Response) => {
     if (toDate) pubDateFilter.lte = toDate;
     if (Object.keys(pubDateFilter).length > 0) {
       where.pubDate = pubDateFilter;
+    }
+
+    if (searchTerm && searchTerm.length > 0) {
+      where.OR = [
+        { title: { contains: searchTerm, mode: 'insensitive' } },
+        { description: { contains: searchTerm, mode: 'insensitive' } },
+      ];
     }
 
     const queryOptions: V1QueryOptions = {
