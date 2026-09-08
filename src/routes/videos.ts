@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../db.js';
 import { runSierraLeoneVideoIngestion } from '../services/video-scraper.js';
+import { parsePositiveInt, parseSearchQuery, parseCategories } from '../utils/query.js';
 import logger from '../logger.js';
 
 const router = Router();
@@ -69,22 +70,19 @@ router.get('/', async (req: Request, res: Response) => {
   try {
     const { channel, category, limit, page, q } = req.query;
 
-    const parsedLimit = limit ? Number(limit) : DEFAULT_LIMIT;
-    if (!Number.isInteger(parsedLimit) || parsedLimit < 1) {
+    const parsedLimit = parsePositiveInt(limit, DEFAULT_LIMIT);
+    if (Number.isNaN(parsedLimit)) {
       return res.status(400).json({ error: 'limit must be a positive integer' });
     }
 
-    const parsedPage = page ? Number(page) : 1;
-    if (!Number.isInteger(parsedPage) || parsedPage < 1) {
+    const parsedPage = parsePositiveInt(page, 1);
+    if (Number.isNaN(parsedPage)) {
       return res.status(400).json({ error: 'page must be a positive integer' });
     }
 
-    let searchTerm: string | undefined;
-    if (q !== undefined) {
-      searchTerm = String(q).trim();
-      if (searchTerm.length > 100) {
-        return res.status(400).json({ error: 'q search term must not exceed 100 characters' });
-      }
+    const { term: searchTerm, error: searchError } = parseSearchQuery(q);
+    if (searchError) {
+      return res.status(400).json({ error: searchError });
     }
 
     const take = Math.min(parsedLimit, MAX_LIMIT);
@@ -103,10 +101,7 @@ router.get('/', async (req: Request, res: Response) => {
     }
 
     if (category) {
-      const categories = String(category)
-        .split(',')
-        .map((c) => c.trim())
-        .filter(Boolean);
+      const categories = parseCategories(category);
       if (categories.length > 0) {
         where.category = { hasSome: categories };
       }
@@ -179,10 +174,10 @@ router.post('/sync', async (_req: Request, res: Response) => {
 router.get('/:id', async (req: Request, res: Response) => {
   try {
     const id = String(req.params.id);
-    const numericId = Number(id);
+    const numericId = parsePositiveInt(id, NaN);
 
     let video = null;
-    if (Number.isInteger(numericId) && numericId >= 1) {
+    if (!Number.isNaN(numericId)) {
       video = await prisma.video.findUnique({ where: { id: numericId } });
     }
 

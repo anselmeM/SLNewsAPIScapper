@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../db.js';
 import { SIERRA_LEONE_SOURCES } from '../config/sources.js';
+import { parsePositiveInt, parseSearchQuery } from '../utils/query.js';
 import logger from '../logger.js';
 
 const router = Router();
@@ -65,22 +66,19 @@ router.get('/', async (req: Request, res: Response) => {
   try {
     const { source, limit, page, q } = req.query;
 
-    const parsedLimit = limit ? Number(limit) : DEFAULT_LIMIT;
-    if (!Number.isInteger(parsedLimit) || parsedLimit < 1) {
+    const parsedLimit = parsePositiveInt(limit, DEFAULT_LIMIT);
+    if (Number.isNaN(parsedLimit)) {
       return res.status(400).json({ error: 'limit must be a positive integer' });
     }
 
-    const parsedPage = page ? Number(page) : 1;
-    if (!Number.isInteger(parsedPage) || parsedPage < 1) {
+    const parsedPage = parsePositiveInt(page, 1);
+    if (Number.isNaN(parsedPage)) {
       return res.status(400).json({ error: 'page must be a positive integer' });
     }
 
-    let searchTerm: string | undefined;
-    if (q !== undefined) {
-      searchTerm = String(q).trim();
-      if (searchTerm.length > 100) {
-        return res.status(400).json({ error: 'q search term must not exceed 100 characters' });
-      }
+    const { term: searchTerm, error: searchError } = parseSearchQuery(q);
+    if (searchError) {
+      return res.status(400).json({ error: searchError });
     }
 
     const take = Math.min(parsedLimit, MAX_LIMIT);
@@ -151,8 +149,8 @@ router.get('/', async (req: Request, res: Response) => {
 router.get('/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const articleId = Number(id);
-    if (!Number.isInteger(articleId) || articleId < 1) {
+    const articleId = parsePositiveInt(id, NaN);
+    if (Number.isNaN(articleId)) {
       return res.status(400).json({ error: 'id must be a positive integer' });
     }
 
