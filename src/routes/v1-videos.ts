@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../db.js';
+import { parsePositiveInt, parseSearchQuery, parseCategories, parseDateRange } from '../utils/query.js';
 import logger from '../logger.js';
 
 const router = Router();
@@ -8,12 +9,6 @@ const router = Router();
 const MAX_PAGE_SIZE = 100;
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE = 10_000;
-
-function parsePositiveInt(value: unknown, fallback: number): number {
-  if (value === undefined) return fallback;
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed >= 1 ? parsed : NaN;
-}
 
 /**
  * @swagger
@@ -96,12 +91,9 @@ router.get('/', async (req: Request, res: Response) => {
   try {
     const { category, channel, page, page_size, limit, from, to, q } = req.query;
 
-    let searchTerm: string | undefined;
-    if (q !== undefined) {
-      searchTerm = String(q).trim();
-      if (searchTerm.length > 100) {
-        return res.status(400).json({ error: 'q search term must not exceed 100 characters' });
-      }
+    const { term: searchTerm, error: searchError } = parseSearchQuery(q);
+    if (searchError) {
+      return res.status(400).json({ error: searchError });
     }
 
     const parsedPageSize = parsePositiveInt(page_size, parsePositiveInt(limit, DEFAULT_PAGE_SIZE));
@@ -117,26 +109,12 @@ router.get('/', async (req: Request, res: Response) => {
       return res.status(400).json({ error: `page must not exceed ${MAX_PAGE}` });
     }
 
-    const fromDate = from ? new Date(String(from)) : undefined;
-    const toDate = to ? new Date(String(to)) : undefined;
-    if (from && (Number.isNaN(fromDate!.getTime()) || !/^\d{4}-\d{2}-\d{2}/.test(String(from)))) {
-      return res.status(400).json({ error: 'from must be a valid ISO date' });
-    }
-    if (to && (Number.isNaN(toDate!.getTime()) || !/^\d{4}-\d{2}-\d{2}/.test(String(to)))) {
-      return res.status(400).json({ error: 'to must be a valid ISO date' });
-    }
-    if (fromDate && toDate && fromDate.getTime() > toDate.getTime()) {
-      return res.status(400).json({ error: 'from must not be after to' });
-    }
-    if (to && toDate && /^\d{4}-\d{2}-\d{2}$/.test(String(to))) {
-      toDate.setUTCHours(23, 59, 59, 999);
+    const { fromDate, toDate, error: dateError } = parseDateRange(from, to);
+    if (dateError) {
+      return res.status(400).json({ error: dateError });
     }
 
-    const rawCategories = category === undefined ? [] : Array.isArray(category) ? category : [category];
-    const categories = rawCategories
-      .flatMap((c) => String(c).split(','))
-      .map((c) => c.trim())
-      .filter((c) => c.length > 0);
+    const categories = parseCategories(category);
 
     const where: Prisma.VideoWhereInput = {};
 

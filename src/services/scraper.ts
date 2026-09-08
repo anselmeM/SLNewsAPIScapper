@@ -1,49 +1,15 @@
 import Parser from 'rss-parser';
-import axios, { AxiosRequestConfig, AxiosResponse } from 'axios';
 import * as cheerio from 'cheerio';
 import { prisma } from '../db.js';
 import { SIERRA_LEONE_SOURCES, NewsSourceConfig } from '../config/sources.js';
 import { runSierraLeoneVideoIngestion } from './video-scraper.js';
 import { normalizeArticleUrl } from '../utils/url.js';
+import { fetchWithRetry, USER_AGENT, sleep } from '../utils/http.js';
 import logger from '../logger.js';
-
-const USER_AGENT =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
-
-const RETRY_DELAY_MS = 1000;
-const MAX_RETRIES = 3;
 
 const parser = new Parser({
   headers: { 'User-Agent': USER_AGENT },
 });
-
-/**
- * GET with exponential backoff (1s, 2s, 4s). Transient network errors, 5xx and
- * 429 (rate limit) are retried; other 4xx responses are not — e.g. a 404 from a
- * numbered sitemap page is how we detect the end of the sitemap.
- */
-async function fetchWithRetry(
-  url: string,
-  options: AxiosRequestConfig = {},
-  retries = MAX_RETRIES,
-): Promise<AxiosResponse> {
-  let lastError: unknown;
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      return await axios.get(url, options);
-    } catch (err) {
-      lastError = err;
-      const status = (err as { response?: { status?: number } }).response?.status;
-      if (status !== undefined && status < 500 && status !== 429) throw err;
-      if (attempt < retries) {
-        const delayMs = process.env.NODE_ENV === 'test' ? 0 : RETRY_DELAY_MS * 2 ** (attempt - 1);
-        logger.warn({ url, attempt, err }, 'Request failed; retrying');
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
-      }
-    }
-  }
-  throw lastError;
-}
 
 interface FeedItem {
   link?: string;
@@ -283,7 +249,7 @@ export async function runSierraLeoneIngestion() {
               },
             });
 
-            await new Promise((resolve) => setTimeout(resolve, 1000));
+            await sleep(1000);
           }
         } catch (itemError) {
           logger.warn({ title: item.title, error: itemError }, 'Error ingesting article');
@@ -419,7 +385,7 @@ async function scrapeTelegraphFromSitemap(): Promise<void> {
           });
           existingLinks.add(url); // keep in-memory dedup in sync
           ingested++;
-          await new Promise((resolve) => setTimeout(resolve, 1500)); // Rate limit
+          await sleep(1500); // Rate limit
         } catch (itemErr) {
           logger.warn({ url, error: itemErr }, 'Sitemap item scrape failed');
         }

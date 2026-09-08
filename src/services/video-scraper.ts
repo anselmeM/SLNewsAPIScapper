@@ -1,38 +1,9 @@
 import * as cheerio from 'cheerio';
-import axios, { AxiosRequestConfig, AxiosResponse } from 'axios';
 import { prisma } from '../db.js';
 import { SIERRA_LEONE_VIDEO_SOURCES, VideoSourceConfig, getYouTubeFeedUrl } from '../config/video-sources.js';
 import { normalizeArticleUrl } from '../utils/url.js';
+import { fetchWithRetry, USER_AGENT, sleep } from '../utils/http.js';
 import logger from '../logger.js';
-
-const USER_AGENT =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
-
-const RETRY_DELAY_MS = 1000;
-const MAX_RETRIES = 3;
-
-async function fetchWithRetry(
-  url: string,
-  options: AxiosRequestConfig = {},
-  retries = MAX_RETRIES,
-): Promise<AxiosResponse> {
-  let lastError: unknown;
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      return await axios.get(url, options);
-    } catch (err) {
-      lastError = err;
-      const status = (err as { response?: { status?: number } }).response?.status;
-      if (status !== undefined && status < 500 && status !== 429) throw err;
-      if (attempt < retries) {
-        const delayMs = process.env.NODE_ENV === 'test' ? 0 : RETRY_DELAY_MS * 2 ** (attempt - 1);
-        logger.warn({ url, attempt, err }, 'Video feed request failed; retrying');
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
-      }
-    }
-  }
-  throw lastError;
-}
 
 export interface ParsedVideo {
   videoId: string;
@@ -178,9 +149,7 @@ export async function runSierraLeoneVideoIngestion(): Promise<{
     totalErrors += errors;
 
     // Small politeness pause between feeds
-    if (process.env.NODE_ENV !== 'test') {
-      await new Promise((resolve) => setTimeout(resolve, 500));
-    }
+    await sleep(500);
   }
 
   logger.info({ totalIngested, totalSkipped, totalErrors }, 'Sierra Leone Video Ingestion Cycle Complete');
