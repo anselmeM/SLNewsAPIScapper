@@ -2,7 +2,6 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
-import crypto from 'crypto';
 import rateLimit from 'express-rate-limit';
 import swaggerUi from 'swagger-ui-express';
 import pinoHttp from 'pino-http';
@@ -13,6 +12,7 @@ import v1VideosRouter from './routes/v1-videos.js';
 import statsRouter from './routes/stats.js';
 import { prisma } from './db.js';
 import { swaggerSpec } from './config/swagger.js';
+import { describeAuthentication, requireAuthentication } from './auth/requireAuthentication.js';
 import logger from './logger.js';
 
 const app = express();
@@ -42,29 +42,11 @@ const limiter = rateLimit({
 });
 app.use(['/api', '/v1'], limiter);
 
-const API_KEY = process.env.API_KEY;
-
-function timingSafeEqualStr(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
-}
-
-function requireApiKey(req: express.Request, res: express.Response, next: express.NextFunction) {
-  if (!API_KEY) {
-    logger.error('API_KEY not configured on server');
-    return res.status(500).json({ error: 'Server misconfiguration: API_KEY is not set' });
-  }
-  // Scheme is case-insensitive per RFC 7235: accept "Bearer", "bearer", etc.
-  const match = /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? '');
-  const key = match?.[1] ?? '';
-  if (key && timingSafeEqualStr(key, API_KEY)) return next();
-  res.status(401).json({ error: 'Unauthorized — provide a valid API key via Authorization: Bearer <key>' });
-}
-
 app.get('/', (_req, res) => {
   res.json({
     name: 'Sierra Leone News API',
-    auth: API_KEY ? 'Requires Authorization: Bearer <key>' : 'API key not configured on server',
+    // Describes the credentials accepted by every protected route below.
+    auth: describeAuthentication(),
     endpoints: {
       news: '/api/news?limit=20&source=<name>&q=<term>',
       article: '/api/news/:id',
@@ -89,15 +71,15 @@ app.get('/api/health', async (_req, res) => {
   }
 });
 
-app.use('/api/news', requireApiKey, newsRouter);
-app.use('/api/videos', requireApiKey, videosRouter);
-app.use(['/api/stats', '/v1/stats'], requireApiKey, statsRouter);
+app.use('/api/news', requireAuthentication, newsRouter);
+app.use('/api/videos', requireAuthentication, videosRouter);
+app.use(['/api/stats', '/v1/stats'], requireAuthentication, statsRouter);
 
 // Versioned business-facing contract (Phase 1). The SLNews app's scraper
 // client calls /v1/news first and falls back to /api/news until this exists;
 // ship /v1 and the app upgrades automatically.
-app.use('/v1/news', requireApiKey, v1Router);
-app.use('/v1/videos', requireApiKey, v1VideosRouter);
+app.use('/v1/news', requireAuthentication, v1Router);
+app.use('/v1/videos', requireAuthentication, v1VideosRouter);
 
 // JSON 404 for unknown routes (Express's default is an HTML "Cannot GET" page)
 app.use((_req, res) => {
