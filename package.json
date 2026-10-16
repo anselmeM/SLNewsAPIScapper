@@ -27,6 +27,7 @@
   ],
   "license": "MIT",
   "dependencies": {
+    "@clerk/backend": "^3.24.0",
     "@prisma/adapter-pg": "^7.8.0",
     "@prisma/client": "^7.8.0",
     "@types/express-rate-limit": "^5.1.3",
