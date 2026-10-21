@@ -42,23 +42,40 @@ Authorization: Bearer <API_KEY>
 
 When `CLERK_SECRET_KEY` is set, a Clerk session JWT is also accepted on the same header. Requests without valid credentials get `401`; if the server has neither `API_KEY` nor Clerk configured, data routes return `500` (fail closed).
 
-| Method | Endpoint           | Auth   | Description                                                                                                      |
-| ------ | ------------------ | ------ | ---------------------------------------------------------------------------------------------------------------- |
-| GET    | `/`                | Public | Service metadata and endpoint list                                                                               |
-| GET    | `/api/news`        | Bearer | **Internal** full-text articles (paginated; `limit`, `page`, `source`, `q`)                                      |
-| GET    | `/api/news/:id`    | Bearer | **Internal** full article row by ID, including `paragraphs`                                                      |
-| GET    | `/api/videos`      | Bearer | **Internal** videos (paginated; `limit`, `page`, `channel`, `category`, `q`)                                     |
-| GET    | `/api/videos/:id`  | Bearer | Video by numeric ID or YouTube video ID                                                                          |
-| POST   | `/api/videos/sync` | Bearer | Trigger a synchronous video feed ingestion                                                                       |
-| GET    | `/api/stats`       | Bearer | Aggregate counts and freshness metrics                                                                           |
-| GET    | `/api/health`      | Public | Liveness/readiness probe (`503` when the database is unreachable)                                                |
-| GET    | `/v1/news`         | Bearer | **Sellable** paginated article metadata + summary (`page`, `page_size`, `source`, `category`, `from`, `to`, `q`) |
-| GET    | `/v1/videos`       | Bearer | **Sellable** paginated video metadata + playback URLs (`page_size`, `channel`, `category`, `from`, `to`, `q`)    |
-| GET    | `/v1/stats`        | Bearer | Same aggregate stats as `/api/stats`                                                                             |
-| GET    | `/docs`            | Public | Swagger UI (OpenAPI document)                                                                                    |
-| GET    | `/v1/docs`         | Public | Swagger UI, versioned alias                                                                                      |
+| Method | Endpoint           | Auth   | Description                                                                                                                    |
+| ------ | ------------------ | ------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| GET    | `/`                | Public | Service metadata and endpoint list                                                                                             |
+| GET    | `/api/news`        | Bearer | **Internal** full-text articles (legacy page/limit pagination; `source`, `q`)                                                  |
+| GET    | `/api/news/:id`    | Bearer | **Internal** full article row by ID, including `paragraphs`                                                                    |
+| GET    | `/api/videos`      | Bearer | **Internal** videos (legacy page/limit pagination; `channel`, `category`, `q`)                                                 |
+| GET    | `/api/videos/:id`  | Bearer | Video by numeric ID or YouTube video ID                                                                                        |
+| POST   | `/api/videos/sync` | Bearer | Trigger a synchronous video feed ingestion                                                                                     |
+| GET    | `/api/stats`       | Bearer | Aggregate counts and freshness metrics                                                                                         |
+| GET    | `/api/health`      | Public | Liveness/readiness probe (`503` when the database is unreachable)                                                              |
+| GET    | `/v1/news`         | Bearer | **Sellable** paginated article metadata + summary (`page`/`cursor`, `page_size`, `source`, `category`, `from`, `to`, `q`)      |
+| GET    | `/v1/videos`       | Bearer | **Sellable** paginated video metadata + playback URLs (`page`/`cursor`, `page_size`, `channel`, `category`, `from`, `to`, `q`) |
+| GET    | `/v1/stats`        | Bearer | Same aggregate stats as `/api/stats`                                                                                           |
+| GET    | `/docs`            | Public | Swagger UI (OpenAPI document)                                                                                                  |
+| GET    | `/v1/docs`         | Public | Swagger UI, versioned alias                                                                                                    |
 
 Public routes (`/`, `/docs`, `/v1/docs`, `/api/health`) need no credentials. Only `/api/health` is exempt from the rate limiter.
+
+### Pagination
+
+`/v1/news` and `/v1/videos` support two mutually exclusive pagination modes:
+
+- **Page-based (default).** `?page=2&page_size=50`. `meta` contains `page`, `page_size`, an exact `total`, `has_more`, and a `next_cursor` (a keyset position for the last row when `has_more` is true, otherwise `null`).
+- **Cursor-based (keyset).** `?page_size=50&cursor=<opaque>`. Passing `page` and `cursor` together returns `400`. Cursor mode skips the `COUNT(*)`: `meta.page` and `meta.total` are `null`, `meta.page_size` is echoed, `meta.has_more` reports whether more rows exist, and `meta.next_cursor` is the cursor for the next page (`null` on the last page).
+
+A client can start with page mode and switch to cursor mode by passing the `next_cursor` from a page-mode response, or start directly with a cursor obtained from a previous cursor-mode response.
+
+Cursors are opaque (a base64url-encoded keyset position) — do not parse, construct, or reuse one across different filters; pass back exactly what `meta.next_cursor` returned.
+
+```bash
+GET /v1/news?page_size=50&cursor=<opaque>   # pass meta.next_cursor from a page-mode or cursor-mode response
+```
+
+The legacy `/api/news` and `/api/videos` routes stay page-based for the pinned SLNews app: `limit` above 100 is still clamped silently as before, but `page` is capped at 10,000 and absurd/deep offsets now return `400` instead of a Prisma overflow `500`.
 
 ### Rate limiting
 
@@ -72,6 +89,16 @@ Public routes (`/`, `/docs`, `/v1/docs`, `/api/health`) need no credentials. Onl
 ### Caching and CORS
 
 Authenticated data responses use `Cache-Control: private` so intermediary caches cannot serve one caller's data to another. CORS exposes `X-Total-Count` plus the `RateLimit-*` and `Retry-After` headers so browser clients can read pagination and throttle state.
+
+### Search indexes
+
+Keyword search (`q`) is still a case-insensitive `ILIKE '%term%'` over title/description (and channel for videos). The `prisma/migrations/20261021000000_search_indexes` migration adds the indexes that keep those scans cheap as the archive grows:
+
+- `pg_trgm` GIN trigram indexes on `Article.title`/`description` and `Video.title`/`description`/`channelTitle` — most effective for search terms of **3+ characters** (shorter terms are below trigram granularity).
+- GIN indexes on the `category` arrays for `hasSome` category filters.
+- Composite `(source, pubDate)` and `(pubDate, id)` indexes, plus `(channelTitle, publishedAt)` and `(publishedAt, id)` for videos, to support filtered feeds and the keyset cursor order.
+
+The migration runs as part of the normal deploy (`prisma migrate deploy`), needs the migration role to be able to `CREATE EXTENSION pg_trgm` (Neon and Render PostgreSQL support it), and builds indexes **non-concurrently**, which takes a brief write lock — run it in a quiet window on a large existing table. Existing databases still need the one-time `npm run db:baseline` before the first `db:migrate:deploy` (see [Deploy to Render](#deploy-to-render)).
 
 ## Scripts
 
