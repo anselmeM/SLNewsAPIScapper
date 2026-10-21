@@ -97,5 +97,53 @@ describe('query utilities', () => {
         error: 'from must not be after to',
       });
     });
+
+    it('rejects impossible calendar dates instead of rolling them over', () => {
+      for (const value of ['2026-02-30', '2026-04-31', '2026-13-01', '2026-00-10', '2026-01-00']) {
+        expect(parseDateRange(value, undefined)).toEqual({ error: 'from must be a valid ISO date' });
+        expect(parseDateRange(undefined, value)).toEqual({ error: 'to must be a valid ISO date' });
+      }
+    });
+
+    it('rejects impossible calendar dates inside date-time strings', () => {
+      expect(parseDateRange('2026-02-30T10:00:00Z', undefined)).toEqual({
+        error: 'from must be a valid ISO date',
+      });
+      expect(parseDateRange(undefined, '2026-13-01T10:00:00Z')).toEqual({
+        error: 'to must be a valid ISO date',
+      });
+    });
+
+    it('accepts date-only and full ISO date-time values', () => {
+      expect(parseDateRange('2026-08-07', undefined).fromDate?.toISOString()).toBe('2026-08-07T00:00:00.000Z');
+      expect(parseDateRange('2026-08-07T12:34:56.789Z', undefined).fromDate?.toISOString()).toBe(
+        '2026-08-07T12:34:56.789Z',
+      );
+      expect(parseDateRange(undefined, '2026-08-08T01:00:00+02:00').toDate?.toISOString()).toBe(
+        '2026-08-07T23:00:00.000Z',
+      );
+    });
+
+    it('applies the date-only end-of-day adjustment before the from>to check', () => {
+      const { fromDate, toDate, error } = parseDateRange('2026-08-07T12:00:00Z', '2026-08-07');
+
+      expect(error).toBeUndefined();
+      expect(fromDate?.toISOString()).toBe('2026-08-07T12:00:00.000Z');
+      expect(toDate?.toISOString()).toBe('2026-08-07T23:59:59.999Z');
+    });
+
+    it('still rejects a genuinely inverted full date-time range', () => {
+      expect(parseDateRange('2026-08-08T00:00:00Z', '2026-08-07T23:59:59.999Z')).toEqual({
+        error: 'from must not be after to',
+      });
+    });
+
+    it('accepts a same-day date-only window', () => {
+      const { fromDate, toDate, error } = parseDateRange('2026-08-07', '2026-08-07');
+
+      expect(error).toBeUndefined();
+      expect(fromDate?.toISOString()).toBe('2026-08-07T00:00:00.000Z');
+      expect(toDate?.toISOString()).toBe('2026-08-07T23:59:59.999Z');
+    });
   });
 });

@@ -1,8 +1,10 @@
-import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
 import request from 'supertest';
 import type { Express } from 'express';
 import { prisma } from '../db.js';
 import { encodeCursor } from '../utils/pagination.js';
+import { runSierraLeoneVideoIngestion } from '../services/video-scraper.js';
+import { __resetVideoSyncState } from '../routes/videos.js';
 
 vi.mock('../db.js', () => ({
   prisma: {
@@ -64,6 +66,13 @@ beforeAll(async () => {
 afterAll(() => {
   process.env.API_KEY = originalApiKey;
   process.env.NODE_ENV = originalNodeEnv;
+  delete process.env.VIDEO_SYNC_COOLDOWN_MS;
+});
+
+beforeEach(() => {
+  __resetVideoSyncState();
+  delete process.env.VIDEO_SYNC_COOLDOWN_MS;
+  vi.mocked(runSierraLeoneVideoIngestion).mockClear();
 });
 
 describe('GET /api/videos', () => {
@@ -197,6 +206,58 @@ describe('POST /api/videos/sync', () => {
       totalSkipped: 1,
       totalErrors: 0,
     });
+  });
+
+  it('returns 409 while a sync is already in flight', async () => {
+    let resolveIngestion: (value: unknown) => void = () => undefined;
+    const deferred = new Promise((resolve) => {
+      resolveIngestion = resolve;
+    });
+    const ingestion = vi.mocked(runSierraLeoneVideoIngestion);
+    ingestion.mockImplementationOnce(() => deferred as never);
+
+    // Start the first request without awaiting it, then wait until the mocked
+    // ingestion is actually running before firing the overlapping request.
+    const firstResponse = app
+      .post('/api/videos/sync')
+      .set('Authorization', 'Bearer test-key-123')
+      .then((res) => res);
+    await vi.waitFor(() => expect(ingestion).toHaveBeenCalledTimes(1));
+
+    const concurrent = await app.post('/api/videos/sync').set('Authorization', 'Bearer test-key-123');
+    expect(concurrent.status).toBe(409);
+    expect(concurrent.body).toEqual({ error: 'Video sync already in progress' });
+
+    resolveIngestion({ totalIngested: 1, totalSkipped: 0, totalErrors: 0 });
+    const first = await firstResponse;
+    expect(first.status).toBe(200);
+    expect(first.body.status).toBe('ok');
+  });
+
+  it('returns 429 with Retry-After during the cooldown window', async () => {
+    process.env.VIDEO_SYNC_COOLDOWN_MS = '60000';
+
+    const first = await app.post('/api/videos/sync').set('Authorization', 'Bearer test-key-123');
+    expect(first.status).toBe(200);
+
+    const second = await app.post('/api/videos/sync').set('Authorization', 'Bearer test-key-123');
+    expect(second.status).toBe(429);
+    expect(second.body.error).toBe('Video sync is cooling down');
+    expect(second.body.retry_after_seconds).toBeGreaterThan(0);
+    expect(second.body.retry_after_seconds).toBeLessThanOrEqual(60);
+    expect(second.headers['retry-after']).toBe(String(second.body.retry_after_seconds));
+    expect(vi.mocked(runSierraLeoneVideoIngestion)).toHaveBeenCalledTimes(1);
+  });
+
+  it('allows another sync immediately when the cooldown is zero', async () => {
+    process.env.VIDEO_SYNC_COOLDOWN_MS = '0';
+
+    const first = await app.post('/api/videos/sync').set('Authorization', 'Bearer test-key-123');
+    expect(first.status).toBe(200);
+
+    const second = await app.post('/api/videos/sync').set('Authorization', 'Bearer test-key-123');
+    expect(second.status).toBe(200);
+    expect(vi.mocked(runSierraLeoneVideoIngestion)).toHaveBeenCalledTimes(2);
   });
 });
 

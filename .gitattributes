@@ -1,0 +1,14 @@
+# Normalize text files to LF in the repository (checkouts honour core.autocrlf).
+* text=auto
+
+# Binary assets: never convert line endings or attempt text diffs.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+
+# Patches target the separate SLNews app repo and must stay byte-for-byte.
+*.patch -text

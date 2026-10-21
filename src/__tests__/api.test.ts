@@ -615,6 +615,34 @@ describe('Versioned API v1', () => {
     );
   });
 
+  it('accepts a time-of-day from when to is the same date-only day', async () => {
+    const mockFindMany = prisma.article.findMany as ReturnType<typeof vi.fn>;
+    mockFindMany.mockResolvedValueOnce(mockArticles);
+
+    const res = await app
+      .get('/v1/news?from=2026-08-07T12:00:00Z&to=2026-08-07')
+      .set('Authorization', 'Bearer test-key-123');
+
+    expect(res.status).toBe(200);
+    expect(mockFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          pubDate: {
+            gte: new Date('2026-08-07T12:00:00Z'),
+            lte: new Date('2026-08-07T23:59:59.999Z'),
+          },
+        }),
+      }),
+    );
+  });
+
+  it('returns 400 for an impossible calendar date', async () => {
+    const res = await app.get('/v1/news?from=2026-02-30').set('Authorization', 'Bearer test-key-123');
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('from must be a valid ISO date');
+  });
+
   it('returns 400 for a page beyond the cap', async () => {
     const res = await app.get('/v1/news?page=10001').set('Authorization', 'Bearer test-key-123');
     expect(res.status).toBe(400);

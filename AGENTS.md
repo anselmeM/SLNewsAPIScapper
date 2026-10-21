@@ -45,8 +45,13 @@ Standard push flow: `bash "C:\Users\amotc\.agents\skills\git-pushing\scripts\sma
 
 - `src/index.ts` / `src/server.ts` — Express app: auth (`requireAuthentication` +
   `requireScopes`: static key, Clerk JWT, or DB customer key; scope-guarded),
-  per-credential/IP rate limiter (health exempt), CORS, helmet, JSON 404, terminal
-  error handler, pino-http logging with credential redaction, graceful shutdown.
+  per-credential/IP API rate limiter (health exempt) plus a separate docs-UI
+  limiter (`DOCS_RATE_LIMIT_MAX`), CORS (one startup warning when
+  `CORS_ORIGIN` is unset in production), helmet, JSON 404, terminal error
+  handler, pino-http logging with credential redaction, graceful shutdown
+  (`createShutdownHandler`: drains idle connections, unref'd force-exit timer,
+  duplicate signals ignored) and fatal `unhandledRejection`/`uncaughtException`
+  handlers. Production logs are JSON; `pino-pretty` is dev-only.
 - `src/auth/` — `requireAuthentication.ts` (static `API_KEY`, optional Clerk
   session JWT, and `slk_`-prefixed DB customer keys; fails closed with 500 when
   neither static key nor Clerk is configured), `authorize.ts` (scope guard:
@@ -65,7 +70,9 @@ Standard push flow: `bash "C:\Users\amotc\.agents\skills\git-pushing\scripts\sma
   `pubDateSource: 'missing'` rows from the sellable feed.
 - `src/routes/videos.ts` / `src/routes/v1-videos.ts` — `/api/videos` (internal)
   and `/v1/videos` (sellable metadata contract, excludes
-  `publishedAtSource: 'missing'`), plus `POST /api/videos/sync`.
+  `publishedAtSource: 'missing'`), plus `POST /api/videos/sync` with an in-process
+  overlap lock (`409`) and `VIDEO_SYNC_COOLDOWN_MS` cooldown (`429` +
+  `Retry-After`/`retry_after_seconds`).
 - `src/routes/stats.ts` — `/api/stats` and `/v1/stats` aggregate counts/freshness
   plus data-quality counters (`articles.missing_date`, `articles.empty_content`,
   `videos.missing_date`).
@@ -74,9 +81,11 @@ Standard push flow: `bash "C:\Users\amotc\.agents\skills\git-pushing\scripts\sma
   (article-page image fetches capped at 10 per run inside a 60 s budget), and a
   bounded content-repair sweep (5 rows/run, 3 attempts each, run deadline).
 - `src/services/video-scraper.ts` — YouTube feed ingestion with date provenance.
-- `src/utils/` — `http.ts` (retry), `query.ts` (pagination/search/date parsing),
-  `dates.ts` (`parsePublishedDate` → `{ date, source, raw }`, never throws),
-  `url.ts` (link normalization).
+- `src/utils/` — `http.ts` (retry), `query.ts` (pagination/search/date parsing,
+  strict ISO calendar validation), `listFilters.ts` (shared `parseListFilters` +
+  `buildArticleWhere`/`buildVideoWhere` + `/v1` metadata mappers used by all four
+  list routes), `dates.ts` (`parsePublishedDate` → `{ date, source, raw }`, never
+  throws), `url.ts` (link normalization).
 - `src/config/` — sources, video sources, Swagger (`swagger.ts` falls back to
   `dist/routes/*.js` so `/docs` works in the Docker image).
 - `prisma/schema.prisma` — `Article`/`Video`/`ApiKey`/`ApiKeyUsage` models on
@@ -91,9 +100,12 @@ Standard push flow: `bash "C:\Users\amotc\.agents\skills\git-pushing\scripts\sma
 - `.husky/` — pre-commit (lint-staged), commit-msg (commitlint), pre-push
   (blocks master + runs tests). `docs/GIT-WORKFLOW.md` — full workflow doc.
 - `docs/CODEBASE-AUDIT.md` — audit findings and implementation status.
-- `.github/workflows/ci.yml` — CI (lint/typecheck, test, build, docker-on-PR,
-  audit); `.github/PULL_REQUEST_TEMPLATE.md`. `Dockerfile` + `.dockerignore` —
-  optional container path. `.nvmrc` — Node 22; `engines` requires >= 22.12.
+- `.github/workflows/ci.yml` — CI (`lint-and-typecheck`, `test`, `integration` with
+  a `postgres:16` service, `build`, `docker-on-PR`, `audit`);
+  `.github/PULL_REQUEST_TEMPLATE.md`. `Dockerfile` + `.dockerignore` — optional
+  container path. `LICENSE` (MIT), `.gitattributes` (`* text=auto`, binary
+  patterns, `*.patch -text`), `.nvmrc` — Node 22; `engines` requires >= 22.12.
+  `pino-pretty` is a devDependency (production logging is JSON).
 
 ## Business rules (do not violate)
 
