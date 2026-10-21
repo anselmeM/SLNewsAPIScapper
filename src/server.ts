@@ -48,6 +48,158 @@ function rateLimitKey(req: express.Request): string {
   return ipKeyGenerator(req.ip ?? '');
 }
 
+/** Minimal logger surface the shutdown / fatal-error handlers need (pino-compatible). */
+interface ShutdownLogger {
+  info: (...args: any[]) => void;
+  error: (...args: any[]) => void;
+  fatal: (...args: any[]) => void;
+}
+
+/** The subset of `node:http`'s Server that the shutdown handler drives. */
+export interface CloseableServer {
+  close(callback?: (err?: Error) => void): unknown;
+  closeIdleConnections?: () => void;
+}
+
+export interface ShutdownHandlerOptions {
+  /** Listening server; omitted in tests that never start one. */
+  server?: CloseableServer;
+  /** Prisma disconnect, injected so the handler never needs a live database. */
+  disconnect: () => Promise<unknown>;
+  logger: ShutdownLogger;
+  /** Forced-exit deadline after the first signal (default 10s, as before). */
+  forceExitMs?: number;
+  exit?: (code: number) => void;
+  /** Test/observability hook invoked immediately before a forced exit. */
+  onForceExit?: () => void;
+}
+
+/**
+ * Build a SIGTERM/SIGINT handler that drains the server, disconnects Prisma and
+ * exits 0 — with a force-exit fallback if connections never drain.
+ *
+ * Lifecycle guarantees:
+ * - Only the first signal starts a shutdown; later signals are ignored so they
+ *   cannot race the in-flight close or restart the deadline.
+ * - The deadline timer is `unref()`ed and cleared on the graceful path, so a
+ *   successful shutdown cannot be turned into a delayed forced exit and the
+ *   timer never keeps the process alive on its own.
+ * - `process.exit`/Prisma are injected, so the whole lifecycle is unit-testable.
+ */
+export function createShutdownHandler(options: ShutdownHandlerOptions): (signal: string) => void {
+  const {
+    server,
+    disconnect,
+    logger,
+    forceExitMs = 10_000,
+    exit = (code: number) => process.exit(code),
+    onForceExit,
+  } = options;
+  let shuttingDown = false;
+
+  return function shutdown(signal: string): void {
+    if (shuttingDown) {
+      logger.info({ signal }, 'Shutdown already in progress, ignoring signal');
+      return;
+    }
+    shuttingDown = true;
+    logger.info({ signal }, 'Shutting down gracefully');
+
+    const forceExitTimer = setTimeout(() => {
+      logger.error({ forceExitMs }, 'Forced shutdown after timeout');
+      onForceExit?.();
+      exit(1);
+    }, forceExitMs);
+    forceExitTimer.unref?.();
+
+    const finishGracefully = (): void => {
+      clearTimeout(forceExitTimer);
+      logger.info('Server stopped');
+      disconnect()
+        .then(() => exit(0))
+        .catch((error: unknown) => {
+          const err = error instanceof Error ? error : new Error(String(error));
+          logger.error(
+            { name: err.name, message: err.message },
+            'Database disconnect failed during shutdown, exiting anyway',
+          );
+          exit(0);
+        });
+    };
+
+    if (server) {
+      // Stop accepting new connections first, then let in-flight requests drain.
+      server.closeIdleConnections?.();
+      server.close(() => finishGracefully());
+      return;
+    }
+
+    finishGracefully();
+  };
+}
+
+/**
+ * CORS origin resolution + the production warning decision, kept pure so it is
+ * testable without loading the app or a logger.
+ *
+ * The `*` fallback is retained for backward compatibility (the PWA and other
+ * browser clients rely on it when CORS_ORIGIN is not configured), but running a
+ * public API with a wildcard origin in production deserves one loud warning.
+ */
+export function resolveCorsOrigin(
+  nodeEnv: string | undefined,
+  corsOrigin: string | undefined,
+): { origin: string; warning: string | null } {
+  const configured = corsOrigin?.trim();
+  if (configured) return { origin: configured, warning: null };
+
+  return {
+    origin: '*',
+    warning:
+      nodeEnv === 'production'
+        ? 'CORS_ORIGIN is not set: allowing every browser origin (*) in production. Set CORS_ORIGIN to restrict cross-origin access.'
+        : null,
+  };
+}
+
+/** Process-like target for the signal/fatal handlers (injectable in tests). */
+export interface ProcessHandlerTarget {
+  on(event: string, listener: (...args: any[]) => void): unknown;
+}
+
+export interface ProcessHandlerOptions {
+  shutdown: (signal: string) => void;
+  logger: ShutdownLogger;
+  exit?: (code: number) => void;
+  /** Defaults to the real `process`; tests pass an EventEmitter. */
+  target?: ProcessHandlerTarget;
+}
+
+function fatalErrorContext(reason: unknown): { name: string; message: string; stack?: string } {
+  const error = reason instanceof Error ? reason : new Error(typeof reason === 'string' ? reason : 'Unknown error');
+  return { name: error.name, message: error.message, stack: error.stack };
+}
+
+/**
+ * Wire SIGTERM/SIGINT to the shutdown handler and make unhandled rejections /
+ * uncaught exceptions fatal (log name/message/stack, exit 1) instead of leaving
+ * a half-alive process that the platform would keep routing traffic to.
+ */
+export function installProcessHandlers(options: ProcessHandlerOptions): void {
+  const { shutdown, logger, exit = (code: number) => process.exit(code), target = process } = options;
+
+  target.on('SIGTERM', () => shutdown('SIGTERM'));
+  target.on('SIGINT', () => shutdown('SIGINT'));
+  target.on('unhandledRejection', (reason: unknown) => {
+    logger.fatal(fatalErrorContext(reason), 'Unhandled promise rejection — exiting');
+    exit(1);
+  });
+  target.on('uncaughtException', (error: unknown) => {
+    logger.fatal(fatalErrorContext(error), 'Uncaught exception — exiting');
+    exit(1);
+  });
+}
+
 const app = express();
 
 app.set('trust proxy', parseTrustProxyHops(process.env.TRUST_PROXY_HOPS));
@@ -55,10 +207,15 @@ app.set('trust proxy', parseTrustProxyHops(process.env.TRUST_PROXY_HOPS));
 app.use(helmet());
 app.use(compression());
 
-const allowedOrigin = process.env.CORS_ORIGIN || '*';
+const corsResolution = resolveCorsOrigin(process.env.NODE_ENV, process.env.CORS_ORIGIN);
+if (corsResolution.warning) {
+  // One startup warning: the wildcard stays for backward compatibility, but an
+  // operator should know the API is callable from any browser origin.
+  logger.warn(corsResolution.warning);
+}
 app.use(
   cors({
-    origin: allowedOrigin,
+    origin: corsResolution.origin,
     // Custom response headers the browser client must be able to read.
     exposedHeaders: ['X-Total-Count', 'RateLimit-Limit', 'RateLimit-Remaining', 'RateLimit-Reset', 'Retry-After'],
   }),
@@ -93,7 +250,10 @@ const limiter = rateLimit({
   // health check (and thus the whole service) down with it.
   skip: (req) => {
     const path = req.originalUrl.split('?')[0];
-    return path === '/api/health' || path === '/api/ready';
+    // `/v1/docs` matches the `/v1` prefix too; it has its own limiter below, so
+    // exclude the docs UI from the API budget rather than consuming both.
+    const isDocs = path === '/docs' || path.startsWith('/docs/') || path === '/v1/docs' || path.startsWith('/v1/docs/');
+    return path === '/api/health' || path === '/api/ready' || isDocs;
   },
   message: { error: 'Too many requests, please try again later' },
   standardHeaders: true,
@@ -119,7 +279,18 @@ app.get('/', (_req, res) => {
   });
 });
 
-app.use(['/docs', '/v1/docs'], swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+// The interactive docs UI is public and relatively expensive to render, so it
+// gets its own conservative limiter (default 300/15min, env-tunable) instead of
+// sharing — or bypassing — the API budget. Mounted before swaggerUi.serve/setup.
+const docsLimiter = rateLimit({
+  windowMs: positiveIntFromEnv(process.env.RATE_LIMIT_WINDOW_MS, 15 * 60 * 1000),
+  max: positiveIntFromEnv(process.env.DOCS_RATE_LIMIT_MAX, 300),
+  keyGenerator: rateLimitKey,
+  message: { error: 'Too many requests, please try again later' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use(['/docs', '/v1/docs'], docsLimiter, swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
 // The readiness probe runs every ~10s. Caching the database probe briefly keeps
 // it from multiplying database load, and hides a single transient blip from the
@@ -228,34 +399,19 @@ app.use(handleError);
 const PORT = process.env.PORT || 3000;
 let server: ReturnType<typeof app.listen> | undefined;
 
+// Tests import the app only: never listen, never install process handlers, never
+// call process.exit from a test worker.
 if (process.env.NODE_ENV !== 'test') {
   server = app.listen(PORT, () => {
     logger.info({ port: PORT }, 'Sierra Leone News API started');
   });
-}
 
-function shutdown(signal: string) {
-  logger.info({ signal }, 'Shutting down gracefully');
-  if (server) {
-    server.close(() => {
-      prisma.$disconnect().then(() => {
-        logger.info('Server stopped');
-        process.exit(0);
-      });
-    });
-  } else {
-    prisma.$disconnect().then(() => {
-      logger.info('Server stopped');
-      process.exit(0);
-    });
-  }
-  setTimeout(() => {
-    logger.error('Forced shutdown after timeout');
-    process.exit(1);
-  }, 10000);
+  const shutdown = createShutdownHandler({
+    server,
+    disconnect: () => prisma.$disconnect(),
+    logger,
+  });
+  installProcessHandlers({ shutdown, logger });
 }
-
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT', () => shutdown('SIGINT'));
 
 export default app;
