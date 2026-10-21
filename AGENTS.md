@@ -6,15 +6,18 @@ non-negotiable; when in doubt, ask.
 
 ## Golden rules
 
-1. **NEVER push to `master` directly.** `master` is branch-protected (PR required,
-   status checks required, enforced for admins). Every change lands via a feature
-   branch + PR. Local `pre-push` hook enforces the same rule — do not bypass it
-   with `--no-verify` except in a documented emergency.
+1. **NEVER push to `master` directly.** Every change lands via a feature branch + PR.
+   The repo is **private on a free GitHub account**, so GitHub branch protection and
+   rulesets are unavailable (the APIs return `403`). The gate that actually runs is
+   local: the Husky `pre-push` hook rejects pushes to `master` and runs the test
+   suite. Bypassing it with `--no-verify` is only allowed in a documented emergency.
+   Do not claim the branch is protected on GitHub — it is process-enforced.
 2. **Conventional Commits**, one logical change per commit (atomic), subject ≤ 72
    chars, body explains WHY not what. Types: `feat:` `fix:` `refactor:` `perf:`
    `test:` `docs:` `ci:` `chore:` `security:` `revert:` (enforced by commitlint).
-3. **CI is the gate**: `lint-and-typecheck`, `test`, `audit` must be green before
-   merge. Run checks locally first: `npm test`, `npx tsc --noEmit`, `npm run lint`.
+3. **The gates are local hooks + CI + PR discipline**: `lint-and-typecheck`,
+   `test`, `build`, `docker` (PRs), `audit` must be green before merge. Run checks
+   locally first: `npm test`, `npm run typecheck`, `npm run lint`.
 4. **Never rewrite pushed/shared history.** Rebase/squash only on your own
    unpushed branch; if a force-push is unavoidable use `--force-with-lease`.
 5. **No secrets in code.** `DATABASE_URL`, `API_KEY` live in environment settings.
@@ -27,7 +30,7 @@ non-negotiable; when in doubt, ask.
 git switch master && git pull
 git switch -c <type>/<desc>        # feat/ fix/ chore/ docs/ refactor/...
 # ...atomic conventional commits...
-npm test && npx tsc --noEmit && npm run lint
+npm test && npm run typecheck && npm run lint
 git push -u origin <type>/<desc>
 gh pr create --base master --head <type>/<desc>
 # wait for CI, then: gh pr merge --squash --delete-branch
@@ -38,17 +41,37 @@ Standard push flow: `bash "C:\Users\amotc\.agents\skills\git-pushing\scripts\sma
 
 ## Repository map
 
-- `src/index.ts` / `src/server.ts` — Express app: auth (`requireApiKey`, Bearer,
-  timing-safe), rate limiter (health exempt), JSON 404, pino-http logging.
+- `src/index.ts` / `src/server.ts` — Express app: auth (`requireAuthentication`,
+  Bearer static key or Clerk session JWT, timing-safe), per-credential/IP rate
+  limiter (health exempt), CORS, helmet, JSON 404, terminal error handler,
+  pino-http logging with credential redaction, graceful shutdown.
+- `src/auth/` — `requireAuthentication.ts` (static `API_KEY` + optional Clerk
+  session JWT; fails closed with 500 when neither is configured) and `clerk.ts`
+  (JWT verification / `CLERK_AUTHORIZED_PARTIES` checks).
 - `src/routes/news.ts` — legacy `/api/news` (FULL TEXT — app-internal path).
 - `src/routes/v1.ts` — `/v1/news` business contract: **metadata + summary ONLY,
   never `paragraphs`** (`ARTICLE_META_SELECT`). `{ data, meta }` envelope.
+- `src/routes/videos.ts` / `src/routes/v1-videos.ts` — `/api/videos` (internal)
+  and `/v1/videos` (sellable metadata contract), plus `POST /api/videos/sync`.
+- `src/routes/stats.ts` — `/api/stats` and `/v1/stats` aggregate counts/freshness.
 - `src/services/scraper.ts` — RSS + sitemap ingestion, retry/backoff, upsert on
-  link, metadata backfill.
-- `prisma/schema.prisma` — `Article` model; Prisma 7 + `@prisma/adapter-pg`.
+  link, metadata backfill inline per feed item (article-page image fetches capped
+  at 10 per run inside a 60 s budget).
+- `src/services/video-scraper.ts` — YouTube feed ingestion.
+- `src/utils/` — `http.ts` (retry), `query.ts` (pagination/search/date parsing),
+  `url.ts` (link normalization).
+- `src/config/` — sources, video sources, Swagger (`swagger.ts` falls back to
+  `dist/routes/*.js` so `/docs` works in the Docker image).
+- `prisma/schema.prisma` — `Article`/`Video` models; Prisma 7 + `@prisma/adapter-pg`.
+  `prisma/migrations/20261020120000_init` is the baseline; deploy with
+  `npm run db:migrate:deploy`, and run `npm run db:baseline` **once** against a
+  pre-existing `db:push` database before the first migrate-deploy.
 - `.husky/` — pre-commit (lint-staged), commit-msg (commitlint), pre-push
   (blocks master + runs tests). `docs/GIT-WORKFLOW.md` — full workflow doc.
-- `.github/workflows/ci.yml` — CI; `.github/PULL_REQUEST_TEMPLATE.md`.
+- `docs/CODEBASE-AUDIT.md` — audit findings and implementation status.
+- `.github/workflows/ci.yml` — CI (lint/typecheck, test, build, docker-on-PR,
+  audit); `.github/PULL_REQUEST_TEMPLATE.md`. `Dockerfile` + `.dockerignore` —
+  optional container path. `.nvmrc` — Node 22; `engines` requires >= 22.12.
 
 ## Business rules (do not violate)
 
@@ -66,6 +89,9 @@ Standard push flow: `bash "C:\Users\amotc\.agents\skills\git-pushing\scripts\sma
 
 - Windows + `core.autocrlf=true`: working tree files are CRLF. `.prettierrc` has
   `endOfLine: auto` — never remove it or `npm run lint` breaks locally.
+- Node.js **>= 22.12**. Local TS execution uses **tsx** (`tsx watch` for the
+  server, `tsx src/scrape.ts` for ingestion); `ts-node` is gone — it is
+  incompatible with TypeScript 7 (no JS compiler API). Do not reintroduce it.
 - Docker is unavailable on this machine; use npm scripts + Vercel CLI. Tests are
   vitest one-shot (`npm test` = `vitest run`).
-- `npm test`, `npx tsc --noEmit`, `npm run lint` must pass before any commit.
+- `npm test`, `npm run typecheck`, `npm run lint` must pass before any commit.

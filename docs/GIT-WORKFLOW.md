@@ -1,7 +1,8 @@
 # Git Workflow
 
 Branch-based workflow for this repo. `master` is the deployable default branch
-(Render auto-deploys it) — **never commit or push to `master` directly**.
+(Render auto-deploys it **after GitHub checks pass**) — **never commit or push to
+`master` directly**.
 
 ## Branch model
 
@@ -14,6 +15,20 @@ Branch-based workflow for this repo. `master` is the deployable default branch
 
 Rule: work happens on a branch, lands on `master` through a PR.
 
+## What actually enforces the rule
+
+GitHub **branch protection and rulesets are not available here**: the repo is
+private on a free GitHub account and both APIs return `403` ("Upgrade to GitHub
+Pro or make this repository public"). Do not claim the branch is protected on
+GitHub. The gates that really run are:
+
+| Gate                                   | Enforces                                                                                                                           |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Local Husky hooks                      | `pre-commit`: Prettier on staged files · `commit-msg`: Conventional Commits · `pre-push`: blocks `master`/`main` + runs `npm test` |
+| GitHub Actions CI                      | `lint-and-typecheck`, `test`, `build`, `docker` (pull requests only), `audit` on every PR/push                                     |
+| PR discipline                          | A reviewer-approved, squash-merged PR is the only path to `master`                                                                 |
+| Render `autoDeployTrigger: checksPass` | A commit reaches production only after its GitHub checks are green                                                                 |
+
 ## Hooks (installed via Husky)
 
 | Hook         | Enforces                                                                                                                     |
@@ -24,6 +39,8 @@ Rule: work happens on a branch, lands on `master` through a PR.
 
 Bypass is possible (`git commit --no-verify`, `git push --no-verify`) but should
 stay rare — the hooks exist to catch issues in seconds instead of CI minutes.
+`--no-verify` on push is a documented-emergency-only escape hatch, because it also
+skips the test suite and the only local block on pushing `master`.
 
 ## Commit style
 
@@ -68,9 +85,23 @@ Never push to `master` — the `pre-push` hook blocks it.
    reword vague messages, drop noise.
 3. If history was rewritten, push with `git push --force-with-lease` (never bare
    `--force`).
-4. Verify: `npm test`, `npm run typecheck`, `npm run lint`.
+4. Verify locally: `npm test`, `npm run typecheck`, `npm run lint`.
 5. Open the PR using `.github/PULL_REQUEST_TEMPLATE.md` (Summary / Changes /
    Technical Notes / Impact).
+
+## CI and merge
+
+CI (`.github/workflows/ci.yml`) runs `lint-and-typecheck`, `test`, `build`,
+`docker` (container build on PRs only), and `audit`. It is the real review gate:
+branch protection cannot require it, so wait for all jobs to be green before
+merging. Merge with **squash** and delete the branch:
+
+```bash
+gh pr merge --squash --delete-branch
+```
+
+Because `render.yaml` sets `autoDeployTrigger: checksPass`, Render deploys the new
+`master` commit only after those checks pass.
 
 ## Recovery
 
