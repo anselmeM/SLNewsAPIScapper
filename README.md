@@ -50,15 +50,34 @@ When `CLERK_SECRET_KEY` is set, a Clerk session JWT is also accepted on the same
 | GET    | `/api/videos`      | Bearer | **Internal** videos (legacy page/limit pagination; `channel`, `category`, `q`)                                                 |
 | GET    | `/api/videos/:id`  | Bearer | Video by numeric ID or YouTube video ID                                                                                        |
 | POST   | `/api/videos/sync` | Bearer | Trigger a synchronous video feed ingestion                                                                                     |
-| GET    | `/api/stats`       | Bearer | Aggregate counts and freshness metrics                                                                                         |
-| GET    | `/api/health`      | Public | Liveness/readiness probe (`503` when the database is unreachable)                                                              |
+| GET    | `/api/stats`       | Bearer | Aggregate counts, runtime metrics and freshness                                                                                |
+| GET    | `/api/health`      | Public | **Liveness** — 200 while the process is alive; never queries the database                                                      |
+| GET    | `/api/ready`       | Public | **Readiness** — cached database probe; 503 when the database is unreachable                                                    |
 | GET    | `/v1/news`         | Bearer | **Sellable** paginated article metadata + summary (`page`/`cursor`, `page_size`, `source`, `category`, `from`, `to`, `q`)      |
 | GET    | `/v1/videos`       | Bearer | **Sellable** paginated video metadata + playback URLs (`page`/`cursor`, `page_size`, `channel`, `category`, `from`, `to`, `q`) |
 | GET    | `/v1/stats`        | Bearer | Same aggregate stats as `/api/stats`                                                                                           |
 | GET    | `/docs`            | Public | Swagger UI (OpenAPI document)                                                                                                  |
 | GET    | `/v1/docs`         | Public | Swagger UI, versioned alias                                                                                                    |
 
-Public routes (`/`, `/docs`, `/v1/docs`, `/api/health`) need no credentials. Only `/api/health` is exempt from the rate limiter.
+Public routes (`/`, `/docs`, `/v1/docs`, `/api/health`, `/api/ready`) need no credentials. Both probes (`/api/health`, `/api/ready`) are exempt from the rate limiter.
+
+### Health and readiness
+
+- **`GET /api/health` — liveness.** Answers "is the process up?" with `200` and `{ status: 'ok', service: 'sl-news-api', uptime_seconds, timestamp }`. It never queries the database, sends `Cache-Control: no-store`, and is exempt from the rate limiter, so a database outage cannot make the platform restart an otherwise healthy process. Render's `healthCheckPath` stays `/api/health`.
+- **`GET /api/ready` — readiness.** Answers "can this instance serve traffic?" by checking the database through a probe cached for 5 seconds: `200 { status: 'ready', database: 'connected', timestamp }` or `503 { status: 'degraded', database: 'disconnected', timestamp }`. Also `Cache-Control: no-store` and limiter-exempt. **Monitoring and alerting should poll `/api/ready`**, not `/api/health`.
+
+### Request IDs
+
+Every response carries an `X-Request-Id` header. A syntactically valid inbound id (`[A-Za-z0-9._-]{8,128}`) is echoed so traces propagate across services; anything else is replaced with a generated UUID (which also prevents log/trace injection). The id is carried in the pino access logs and included as `request_id` in 404/4xx/5xx JSON error bodies — quote it when reporting a request. It is not in the CORS exposed-header list, so cross-origin browser JavaScript cannot read it (server-to-server and same-origin clients can).
+
+### Monitoring and alerting
+
+External alerting is not wired up in this repo (no Sentry/OTel/Prometheus), so hook the built-in signals into Render notifications or your own tooling:
+
+- Poll `/api/ready` and page on `503` (database unreachable).
+- Poll `/api/stats` (bearer key required) and alert on `freshness.articles.stale` / `freshness.videos.stale`. `freshness.*.lag_seconds` is the current ingestion delay; a feed with no ingested data reports `lag_seconds: null` and `stale: true` (no data is not healthy). The threshold is `FRESHNESS_MAX_AGE_MS` (default 2 hours).
+- Use `X-Request-Id` to correlate a support report with the matching access-log line or 5xx error.
+- `/api/stats` `runtime` (`uptime_seconds`, `process_started_at`, `memory_rss_mb`, `node_version`, `requests_total`, `requests_by_status`) describes the current process only: the counters are in-memory and reset on every deploy/restart, so treat them as process-local signals rather than durable metrics.
 
 ### Pagination
 
@@ -132,6 +151,7 @@ The migration runs as part of the normal deploy (`prisma migrate deploy`), needs
 | `TRUST_PROXY_HOPS`         | No                | `1`                     | Reverse-proxy hops trusted for `X-Forwarded-For`                           |
 | `RATE_LIMIT_MAX`           | No                | `100`                   | Max requests per window per caller                                         |
 | `RATE_LIMIT_WINDOW_MS`     | No                | `900000` (15 min)       | Rate-limit window in milliseconds                                          |
+| `FRESHNESS_MAX_AGE_MS`     | No                | `7200000` (2 h)         | Ingestion lag above which `/api/stats` marks a feed `stale`                |
 
 ## Deploy to Render
 
@@ -139,13 +159,13 @@ The migration runs as part of the normal deploy (`prisma migrate deploy`), needs
 
 `render.yaml` is the source of truth. It provisions two services:
 
-- **`sl-news-api`** (web): builds with `npm ci --include=dev && npx prisma migrate deploy && npm run build`, starts with `node dist/server.js`, health-checks `/api/health`, and deploys only after GitHub checks pass (`autoDeployTrigger: checksPass`).
+- **`sl-news-api`** (web): builds with `npm ci --include=dev && npx prisma migrate deploy && npm run build`, starts with `node dist/server.js`, health-checks `/api/health` (liveness), and deploys only after GitHub checks pass (`autoDeployTrigger: checksPass`).
 - **`sl-news-scraper`** (cron): hourly (`0 * * * *`), runs `node dist/scrape.js`.
 
 Setup:
 
 1. Click the button above, or on Render choose **New → Blueprint** and connect this repo.
-2. Provide `DATABASE_URL` and `API_KEY` when prompted (plus optional `CORS_ORIGIN`, `CLERK_SECRET_KEY`, `CLERK_AUTHORIZED_PARTIES`). **`API_KEY` is required**: without it every data route returns `500` while `/api/health` still reports green.
+2. Provide `DATABASE_URL` and `API_KEY` when prompted (plus optional `CORS_ORIGIN`, `CLERK_SECRET_KEY`, `CLERK_AUTHORIZED_PARTIES`, `FRESHNESS_MAX_AGE_MS`). **`API_KEY` is required**: without it every data route returns `500`, while the liveness probe `/api/health` still reports green (it does not check the database or auth).
 3. **The cron service needs a paid plan.** Render does not offer free cron jobs; the blueprint uses `plan: starter` (smallest paid plan). The web service can stay on the free plan, which spins down after inactivity.
 4. Deploy. The web build applies committed migrations with `prisma migrate deploy` before compiling.
 
