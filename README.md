@@ -34,32 +34,76 @@ The API listens on `PORT` (default `3000`). For a throwaway local database you c
 
 ## API
 
-Every `/api/*` and `/v1/*` data route requires an API credential:
+Every `/api/*` and `/v1/*` data route requires an API credential in the `Authorization` header:
 
 ```http
-Authorization: Bearer <API_KEY>
+Authorization: Bearer <API_KEY | Clerk session JWT | slk_... customer key>
 ```
 
-When `CLERK_SECRET_KEY` is set, a Clerk session JWT is also accepted on the same header. Requests without valid credentials get `401`; if the server has neither `API_KEY` nor Clerk configured, data routes return `500` (fail closed).
+Credentials carry scopes: **`v1:read`** for the sellable `/v1/*` routes and **`internal:read`** for the legacy full-text `/api/*` routes. A missing or invalid credential gets `401`; a valid credential that lacks the scope for the route gets `403`. If neither `API_KEY` nor Clerk is configured, data routes return `500` (fail closed). See [API keys and scopes](#api-keys-and-scopes).
 
-| Method | Endpoint           | Auth   | Description                                                                                                                    |
-| ------ | ------------------ | ------ | ------------------------------------------------------------------------------------------------------------------------------ |
-| GET    | `/`                | Public | Service metadata and endpoint list                                                                                             |
-| GET    | `/api/news`        | Bearer | **Internal** full-text articles (legacy page/limit pagination; `source`, `q`)                                                  |
-| GET    | `/api/news/:id`    | Bearer | **Internal** full article row by ID, including `paragraphs`                                                                    |
-| GET    | `/api/videos`      | Bearer | **Internal** videos (legacy page/limit pagination; `channel`, `category`, `q`)                                                 |
-| GET    | `/api/videos/:id`  | Bearer | Video by numeric ID or YouTube video ID                                                                                        |
-| POST   | `/api/videos/sync` | Bearer | Trigger a synchronous video feed ingestion                                                                                     |
-| GET    | `/api/stats`       | Bearer | Aggregate counts, runtime metrics and freshness                                                                                |
-| GET    | `/api/health`      | Public | **Liveness** — 200 while the process is alive; never queries the database                                                      |
-| GET    | `/api/ready`       | Public | **Readiness** — cached database probe; 503 when the database is unreachable                                                    |
-| GET    | `/v1/news`         | Bearer | **Sellable** paginated article metadata + summary (`page`/`cursor`, `page_size`, `source`, `category`, `from`, `to`, `q`)      |
-| GET    | `/v1/videos`       | Bearer | **Sellable** paginated video metadata + playback URLs (`page`/`cursor`, `page_size`, `channel`, `category`, `from`, `to`, `q`) |
-| GET    | `/v1/stats`        | Bearer | Same aggregate stats as `/api/stats`                                                                                           |
-| GET    | `/docs`            | Public | Swagger UI (OpenAPI document)                                                                                                  |
-| GET    | `/v1/docs`         | Public | Swagger UI, versioned alias                                                                                                    |
+| Method | Endpoint           | Auth                     | Description                                                                                                                    |
+| ------ | ------------------ | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| GET    | `/`                | Public                   | Service metadata and endpoint list                                                                                             |
+| GET    | `/api/news`        | Bearer · `internal:read` | **Internal** full-text articles (legacy page/limit pagination; `source`, `q`)                                                  |
+| GET    | `/api/news/:id`    | Bearer · `internal:read` | **Internal** full article row by ID, including `paragraphs`                                                                    |
+| GET    | `/api/videos`      | Bearer · `internal:read` | **Internal** videos (legacy page/limit pagination; `channel`, `category`, `q`)                                                 |
+| GET    | `/api/videos/:id`  | Bearer · `internal:read` | Video by numeric ID or YouTube video ID                                                                                        |
+| POST   | `/api/videos/sync` | Bearer · `internal:read` | Trigger a synchronous video feed ingestion                                                                                     |
+| GET    | `/api/stats`       | Bearer · `internal:read` | Aggregate counts, runtime metrics and freshness                                                                                |
+| GET    | `/api/health`      | Public                   | **Liveness** — 200 while the process is alive; never queries the database                                                      |
+| GET    | `/api/ready`       | Public                   | **Readiness** — cached database probe; 503 when the database is unreachable                                                    |
+| GET    | `/v1/news`         | Bearer · `v1:read`       | **Sellable** paginated article metadata + summary (`page`/`cursor`, `page_size`, `source`, `category`, `from`, `to`, `q`)      |
+| GET    | `/v1/videos`       | Bearer · `v1:read`       | **Sellable** paginated video metadata + playback URLs (`page`/`cursor`, `page_size`, `channel`, `category`, `from`, `to`, `q`) |
+| GET    | `/v1/stats`        | Bearer · `v1:read`       | Same aggregate stats as `/api/stats`                                                                                           |
+| GET    | `/docs`            | Public                   | Swagger UI (OpenAPI document)                                                                                                  |
+| GET    | `/v1/docs`         | Public                   | Swagger UI, versioned alias                                                                                                    |
 
 Public routes (`/`, `/docs`, `/v1/docs`, `/api/health`, `/api/ready`) need no credentials. Both probes (`/api/health`, `/api/ready`) are exempt from the rate limiter.
+
+### API keys and scopes
+
+Two scopes gate the two API surfaces:
+
+| Scope           | Grants                                                                                                                 |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `v1:read`       | All sellable routes: `/v1/news`, `/v1/videos`, `/v1/stats`                                                             |
+| `internal:read` | The legacy full-text surface used by the SLNews app: `/api/news`, `/api/videos`, `POST /api/videos/sync`, `/api/stats` |
+
+Three kinds of credential are accepted:
+
+- **Static `API_KEY`** — `Authorization: Bearer <API_KEY>`. Gets `STATIC_KEY_SCOPES` (default `internal:read,v1:read`, preserving the pre-scopes behaviour).
+- **Clerk session JWT** — when `CLERK_SECRET_KEY` is set. Gets `CLERK_SCOPES` (default `internal:read,v1:read`).
+- **Customer API keys** — DB-backed per-customer credentials with a `slk_` prefix. They get exactly the scopes stored on their row; the prefix routes verification to the database, so only these tokens cause a DB lookup.
+
+In production, narrow the legacy credentials instead of leaving blanket access: e.g. a static key limited to the app's internal path and customers limited to `v1:read`:
+
+```bash
+STATIC_KEY_SCOPES=internal:read   # the pinned app still reads /api/news full text
+CLERK_SCOPES=v1:read              # signed-in customers can only read the sellable surface
+```
+
+Unknown scope names in `STATIC_KEY_SCOPES`/`CLERK_SCOPES` are ineffective (they never match a route's required scope).
+
+**Customer key administration** (needs `DATABASE_URL`; run locally or as a one-off Render job/shell):
+
+```bash
+# Create: prints the raw slk_... key exactly once — only its SHA-256 hash is stored
+npm run keys:create -- --name "Acme News" --scopes v1:read
+npm run keys:create -- --name "Acme News" --scopes v1:read --expires-at 2027-01-01T00:00:00Z
+
+# List: id, name, scopes, active, createdAt, lastUsedAt, expiresAt, today's requests
+npm run keys:list
+
+# Revoke (sets active=false; the row and its usage history remain)
+npm run keys:revoke -- --id 3
+```
+
+**Responses:** `401` for a missing/unknown/revoked/expired credential, `403` for a valid credential without the route's scope (the body includes `required_scope`), and `503` if the database is unavailable while verifying a customer key (so an outage is never mistaken for a revoked key).
+
+**Verification cache:** successful verifications are cached for `API_KEY_CACHE_TTL_MS` (default 30 s) per instance and unknown keys are negatively cached for 5 s. Revocation and scope changes therefore take effect within that window (restart the API to apply immediately). Bad tokens without the `slk_` prefix never touch the database.
+
+**Usage metering:** each successful customer-key verification records a per-key, per-UTC-day request count (`ApiKeyUsage`) and throttles `lastUsedAt` to at most once a minute. Writes are fire-and-forget/advisory — they never block or fail authentication — and `npm run keys:list` shows today's count. There is no billing/quota integration yet; quotas are currently only the existing per-credential rate limit. Raw keys and bearer tokens are never logged; only the key id and its scopes are.
 
 ### Health and readiness
 
@@ -134,20 +178,23 @@ The migration runs as part of the normal deploy (`prisma migrate deploy`), needs
 
 ## Scripts
 
-| Command                     | Purpose                                                          |
-| --------------------------- | ---------------------------------------------------------------- |
-| `npm run build`             | Compile TypeScript to `dist/` (`tsc -p tsconfig.build.json`)     |
-| `npm run dev`               | Start the API with watch/reload (`tsx watch src/server.ts`)      |
-| `npm run dev:all`           | Run ingestion once, then start the API (`tsx src/index.ts`)      |
-| `npm start`                 | Start the compiled API (`node dist/server.js`)                   |
-| `npm run scrape`            | Run one ingestion cycle and exit (`tsx src/scrape.ts`)           |
-| `npm test`                  | Run the Vitest suite once (`vitest run`)                         |
-| `npm run typecheck`         | Typecheck the project (`tsc --noEmit`)                           |
-| `npm run lint`              | Prettier check on `src/`                                         |
-| `npm run format`            | Prettier write on `src/`                                         |
-| `npm run db:push`           | Push the Prisma schema without migrations (local/dev only)       |
-| `npm run db:migrate:deploy` | Apply committed migrations (`prisma migrate deploy`)             |
-| `npm run db:baseline`       | Mark the baseline migration as applied (existing databases only) |
+| Command                     | Purpose                                                                                  |
+| --------------------------- | ---------------------------------------------------------------------------------------- |
+| `npm run build`             | Compile TypeScript to `dist/` (`tsc -p tsconfig.build.json`)                             |
+| `npm run dev`               | Start the API with watch/reload (`tsx watch src/server.ts`)                              |
+| `npm run dev:all`           | Run ingestion once, then start the API (`tsx src/index.ts`)                              |
+| `npm start`                 | Start the compiled API (`node dist/server.js`)                                           |
+| `npm run scrape`            | Run one ingestion cycle and exit (`tsx src/scrape.ts`)                                   |
+| `npm test`                  | Run the Vitest suite once (`vitest run`)                                                 |
+| `npm run typecheck`         | Typecheck the project (`tsc --noEmit`)                                                   |
+| `npm run lint`              | Prettier check on `src/`                                                                 |
+| `npm run format`            | Prettier write on `src/`                                                                 |
+| `npm run db:push`           | Push the Prisma schema without migrations (local/dev only)                               |
+| `npm run db:migrate:deploy` | Apply committed migrations (`prisma migrate deploy`)                                     |
+| `npm run db:baseline`       | Mark the baseline migration as applied (existing databases only)                         |
+| `npm run keys:create`       | Create a customer API key (`-- --name "<customer>" --scopes v1:read [--expires-at ISO]`) |
+| `npm run keys:list`         | List customer keys, scopes, status and today's request count                             |
+| `npm run keys:revoke`       | Revoke a customer key (`-- --id <n>`)                                                    |
 
 ## Environment variables
 
@@ -161,6 +208,9 @@ The migration runs as part of the normal deploy (`prisma migrate deploy`), needs
 | `CORS_ORIGIN`              | No                | `*`                     | Allowed browser origin(s); pin it in production                             |
 | `CLERK_SECRET_KEY`         | No                | —                       | Enables Clerk session-JWT auth alongside `API_KEY`                          |
 | `CLERK_AUTHORIZED_PARTIES` | No                | —                       | Comma-separated `azp` allowlist for Clerk JWTs                              |
+| `STATIC_KEY_SCOPES`        | No                | `internal:read,v1:read` | Scopes granted to the static `API_KEY` (narrow in production)               |
+| `CLERK_SCOPES`             | No                | `internal:read,v1:read` | Scopes granted to verified Clerk session JWTs (narrow in production)        |
+| `API_KEY_CACHE_TTL_MS`     | No                | `30000` (30 s)          | Customer-key verification cache TTL; bounds revocation/scope-change lag     |
 | `TRUST_PROXY_HOPS`         | No                | `1`                     | Reverse-proxy hops trusted for `X-Forwarded-For`                            |
 | `RATE_LIMIT_MAX`           | No                | `100`                   | Max requests per window per caller                                          |
 | `RATE_LIMIT_WINDOW_MS`     | No                | `900000` (15 min)       | Rate-limit window in milliseconds                                           |
@@ -180,7 +230,7 @@ The migration runs as part of the normal deploy (`prisma migrate deploy`), needs
 Setup:
 
 1. Click the button above, or on Render choose **New → Blueprint** and connect this repo.
-2. Provide `DATABASE_URL` and `API_KEY` when prompted (plus optional `CORS_ORIGIN`, `CLERK_SECRET_KEY`, `CLERK_AUTHORIZED_PARTIES`, `FRESHNESS_MAX_AGE_MS`, `INGESTION_DEADLINE_MS`, `SCRAPER_USER_AGENT`). **`API_KEY` is required**: without it every data route returns `500`, while the liveness probe `/api/health` still reports green (it does not check the database or auth).
+2. Provide `DATABASE_URL` and `API_KEY` when prompted (plus optional `CORS_ORIGIN`, `CLERK_SECRET_KEY`, `CLERK_AUTHORIZED_PARTIES`, `STATIC_KEY_SCOPES`, `CLERK_SCOPES`, `API_KEY_CACHE_TTL_MS`, `FRESHNESS_MAX_AGE_MS`, `INGESTION_DEADLINE_MS`, `SCRAPER_USER_AGENT`). **`API_KEY` is required**: without it every data route returns `500`, while the liveness probe `/api/health` still reports green (it does not check the database or auth).
 3. **The cron service needs a paid plan.** Render does not offer free cron jobs; the blueprint uses `plan: starter` (smallest paid plan). The web service can stay on the free plan, which spins down after inactivity.
 4. Deploy. The web build applies committed migrations with `prisma migrate deploy` before compiling.
 
@@ -200,6 +250,12 @@ Setup:
 3. Deploy normally. Every later deploy applies only new migrations via `prisma migrate deploy`.
 
 If you run `db:baseline` against a database on which the baseline SQL was never applied, later migrations will fail — only baseline databases created by the old `db:push` workflow.
+
+### Customer API keys in production
+
+- The `20261021120000_api_keys` migration creates `ApiKey` and `ApiKeyUsage`. The web build applies it with `prisma migrate deploy` like any other migration (an existing database still needs its one-time baseline first).
+- Run the admin CLI with `DATABASE_URL` pointing at the production database (locally or in a one-off Render shell/job): `npm run keys:create -- --name "Acme News" --scopes v1:read`, then `npm run keys:list` / `npm run keys:revoke -- --id <n>`.
+- Static `API_KEY` and Clerk behaviour is unchanged by this migration. A **DB-keys-only** deployment is not supported: the server still requires at least one of `API_KEY` / `CLERK_SECRET_KEY`, otherwise every data route returns the legacy `500` misconfiguration.
 
 ### Docker (optional)
 

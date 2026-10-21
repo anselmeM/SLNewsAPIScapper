@@ -15,6 +15,8 @@ import statsRouter from './routes/stats.js';
 import { prisma } from './db.js';
 import { swaggerSpec } from './config/swagger.js';
 import { describeAuthentication, requireAuthentication } from './auth/requireAuthentication.js';
+import { requireScopes } from './auth/authorize.js';
+import { SCOPES } from './auth/apiKeys.js';
 import logger, { LOG_REDACTION } from './logger.js';
 import { positiveIntFromEnv, requestIdMiddleware, runtimeMetrics } from './observability.js';
 
@@ -164,15 +166,21 @@ app.get('/api/ready', async (_req, res) => {
   }
 });
 
-app.use('/api/news', requireAuthentication, newsRouter);
-app.use('/api/videos', requireAuthentication, videosRouter);
-app.use(['/api/stats', '/v1/stats'], requireAuthentication, statsRouter);
+// Scope enforcement after authentication: the legacy `/api` surface (the
+// pinned app's full-text path) needs `internal:read`; the sellable `/v1`
+// contracts need `v1:read`. Static/Clerk credentials default to both scopes so
+// existing clients are unchanged; DB-backed customer keys get exactly the
+// scopes on their row.
+app.use('/api/news', requireAuthentication, requireScopes(SCOPES.INTERNAL_READ), newsRouter);
+app.use('/api/videos', requireAuthentication, requireScopes(SCOPES.INTERNAL_READ), videosRouter);
+app.use('/api/stats', requireAuthentication, requireScopes(SCOPES.INTERNAL_READ), statsRouter);
+app.use('/v1/stats', requireAuthentication, requireScopes(SCOPES.V1_READ), statsRouter);
 
 // Versioned business-facing contract: metadata + summary only, for future paying
 // customers. The SLNews app is deliberately pinned to the legacy full-text
 // /api/news route above and must not be switched to /v1 (it needs `paragraphs`).
-app.use('/v1/news', requireAuthentication, v1Router);
-app.use('/v1/videos', requireAuthentication, v1VideosRouter);
+app.use('/v1/news', requireAuthentication, requireScopes(SCOPES.V1_READ), v1Router);
+app.use('/v1/videos', requireAuthentication, requireScopes(SCOPES.V1_READ), v1VideosRouter);
 
 // JSON 404 for unknown routes (Express's default is an HTML "Cannot GET" page).
 // The correlation id lets a caller quote one id when reporting a bad request.

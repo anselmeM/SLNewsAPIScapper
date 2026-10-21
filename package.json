@@ -20,7 +20,10 @@
     "format:check": "prettier --check \"src/**/*.ts\"",
     "db:push": "prisma db push",
     "db:migrate:deploy": "prisma migrate deploy",
-    "db:baseline": "prisma migrate resolve --applied 20261020120000_init"
+    "db:baseline": "prisma migrate resolve --applied 20261020120000_init",
+    "keys:create": "tsx src/scripts/api-keys.ts create",
+    "keys:list": "tsx src/scripts/api-keys.ts list",
+    "keys:revoke": "tsx src/scripts/api-keys.ts revoke"
   },
   "engines": {
     "node": ">=22.12.0"

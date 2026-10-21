@@ -53,3 +53,35 @@ model Video {
   @@index([publishedAt, id])
   @@index([category], type: Gin)
 }
+
+// Customer API keys (sellable-product credential model).
+//
+// Only the SHA-256 hash of a key is stored: the raw `slk_...` value is shown
+// once at creation time (see scripts/api-keys.ts) and can never be recovered.
+// `scopes` holds the granted scopes (`v1:read`, `internal:read`); the static
+// API_KEY and Clerk session JWTs get their scopes from env instead.
+model ApiKey {
+  id         Int           @id @default(autoincrement())
+  name       String
+  keyHash    String        @unique
+  scopes     String[]
+  active     Boolean       @default(true)
+  createdAt  DateTime      @default(now())
+  lastUsedAt DateTime?
+  expiresAt  DateTime?
+  usage      ApiKeyUsage[]
+
+  @@index([active])
+}
+
+// Per-key, per-UTC-day request counters for usage metering/billing groundwork.
+model ApiKeyUsage {
+  id       Int      @id @default(autoincrement())
+  apiKeyId Int
+  day      DateTime @db.Date
+  requests Int      @default(0)
+  apiKey   ApiKey   @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+
+  @@unique([apiKeyId, day])
+  @@index([day])
+}
