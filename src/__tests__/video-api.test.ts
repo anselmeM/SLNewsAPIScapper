@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 import type { Express } from 'express';
 import { prisma } from '../db.js';
+import { encodeCursor } from '../utils/pagination.js';
 
 vi.mock('../db.js', () => ({
   prisma: {
@@ -107,6 +108,33 @@ describe('GET /api/videos', () => {
     expect(res2.status).toBe(400);
   });
 
+  it('rejects an absurd page as a 400 instead of a Prisma 500', async () => {
+    const mockFindMany = prisma.video.findMany as ReturnType<typeof vi.fn>;
+    mockFindMany.mockClear();
+
+    for (const page of ['1000000000', '1e21']) {
+      const res = await app.get(`/api/videos?page=${page}`).set('Authorization', 'Bearer test-key-123');
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('page');
+    }
+    expect(mockFindMany).not.toHaveBeenCalled();
+  });
+
+  it('caps legacy offset pagination at page 10000', async () => {
+    const res = await app.get('/api/videos?page=10001').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('page must not exceed 10000');
+  });
+
+  it('still clamps limit above 100 for the pinned legacy client', async () => {
+    (prisma.video.findMany as ReturnType<typeof vi.fn>).mockResolvedValueOnce(mockVideos);
+    (prisma.video.count as ReturnType<typeof vi.fn>).mockResolvedValueOnce(1);
+
+    const res = await app.get('/api/videos?limit=1000').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(200);
+    expect(prisma.video.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 100 }));
+  });
+
   it('filters videos by search term q', async () => {
     (prisma.video.findMany as ReturnType<typeof vi.fn>).mockResolvedValueOnce(mockVideos);
     (prisma.video.count as ReturnType<typeof vi.fn>).mockResolvedValueOnce(1);
@@ -173,6 +201,27 @@ describe('POST /api/videos/sync', () => {
 });
 
 describe('GET /v1/videos', () => {
+  const cursorRows = [
+    {
+      ...mockVideos[0],
+      id: 41,
+      videoId: 'cursorVideoA',
+      publishedAt: new Date('2026-08-06T00:00:00.000Z'),
+    },
+    {
+      ...mockVideos[0],
+      id: 40,
+      videoId: 'cursorVideoB',
+      publishedAt: new Date('2026-08-05T00:00:00.000Z'),
+    },
+    {
+      ...mockVideos[0],
+      id: 39,
+      videoId: 'cursorVideoC',
+      publishedAt: new Date('2026-08-04T00:00:00.000Z'),
+    },
+  ];
+
   it('returns versioned envelope with { data, meta }', async () => {
     (prisma.video.findMany as ReturnType<typeof vi.fn>).mockResolvedValueOnce(mockVideos);
     (prisma.video.count as ReturnType<typeof vi.fn>).mockResolvedValueOnce(1);
@@ -197,7 +246,74 @@ describe('GET /v1/videos', () => {
       page_size: 20,
       total: 1,
       has_more: false,
+      next_cursor: null,
     });
+  });
+
+  it('returns a bootstrap cursor from page mode when more results exist', async () => {
+    const mockFindMany = prisma.video.findMany as ReturnType<typeof vi.fn>;
+    const mockCount = prisma.video.count as ReturnType<typeof vi.fn>;
+    mockFindMany.mockClear();
+    mockCount.mockClear();
+    mockFindMany.mockResolvedValueOnce([mockVideos[0]]);
+    mockCount.mockResolvedValueOnce(5);
+
+    const res = await app.get('/v1/videos?page_size=1').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(200);
+    expect(res.body.meta.has_more).toBe(true);
+    expect(res.body.meta.next_cursor).toBe(encodeCursor(mockVideos[0].publishedAt, mockVideos[0].id));
+  });
+
+  it('paginates with a cursor without running a count query (keyset)', async () => {
+    const mockFindMany = prisma.video.findMany as ReturnType<typeof vi.fn>;
+    const mockCount = prisma.video.count as ReturnType<typeof vi.fn>;
+    mockFindMany.mockClear();
+    mockCount.mockClear();
+
+    const cursorDate = new Date('2026-08-07T12:00:00.000Z');
+    const cursor = encodeCursor(cursorDate, 42);
+    mockFindMany.mockResolvedValueOnce(cursorRows);
+
+    const res = await app
+      .get(`/v1/videos?page_size=2&channel=AYV&from=2026-08-01&cursor=${cursor}`)
+      .set('Authorization', 'Bearer test-key-123');
+
+    expect(res.status).toBe(200);
+    const args = mockFindMany.mock.calls[0][0];
+    expect(args.take).toBe(3);
+    expect(args.skip).toBeUndefined();
+    expect(args.orderBy).toEqual([{ publishedAt: 'desc' }, { id: 'desc' }]);
+    // Filters stay direct properties; the keyset predicate lives under AND.
+    expect(args.where.channelTitle).toEqual({ contains: 'AYV', mode: 'insensitive' });
+    expect(args.where.publishedAt).toEqual({ gte: new Date('2026-08-01') });
+    expect(args.where.AND).toEqual([
+      {
+        OR: [{ publishedAt: { lt: cursorDate } }, { publishedAt: cursorDate, id: { lt: 42 } }],
+      },
+    ]);
+    expect(mockCount).not.toHaveBeenCalled();
+
+    expect(res.body.data.map((row: { id: number }) => row.id)).toEqual([41, 40]);
+    expect(res.body.meta).toEqual({
+      page: null,
+      page_size: 2,
+      total: null,
+      has_more: true,
+      next_cursor: encodeCursor(cursorRows[1].publishedAt, 40),
+    });
+  });
+
+  it('returns 400 when page and cursor are both supplied', async () => {
+    const cursor = encodeCursor(new Date('2026-08-07T00:00:00.000Z'), 1);
+    const res = await app.get(`/v1/videos?page=1&cursor=${cursor}`).set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('use either page or cursor, not both');
+  });
+
+  it('returns 400 for an invalid cursor', async () => {
+    const res = await app.get('/v1/videos?cursor=not-a-cursor').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('cursor is invalid');
   });
 
   it('validates date range filters', async () => {

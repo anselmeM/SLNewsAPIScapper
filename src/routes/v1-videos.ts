@@ -1,14 +1,11 @@
 import { Router, Request, Response } from 'express';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../db.js';
-import { parsePositiveInt, parseSearchQuery, parseCategories, parseDateRange } from '../utils/query.js';
+import { parseSearchQuery, parseCategories, parseDateRange } from '../utils/query.js';
+import { parsePagination, parseCursor, encodeCursor } from '../utils/pagination.js';
 import logger from '../logger.js';
 
 const router = Router();
-
-const MAX_PAGE_SIZE = 100;
-const DEFAULT_PAGE_SIZE = 20;
-const MAX_PAGE = 10_000;
 
 /**
  * @swagger
@@ -33,7 +30,16 @@ const MAX_PAGE = 10_000;
  *           type: integer
  *           minimum: 1
  *           default: 1
- *         description: Page number for pagination (1-based)
+ *         description: Page number for pagination (1-based). Cannot be combined with `cursor`.
+ *       - in: query
+ *         name: cursor
+ *         schema:
+ *           type: string
+ *         description: |
+ *           Opaque keyset cursor from a previous response's `meta.next_cursor`.
+ *           Cannot be combined with `page`. In cursor mode `meta.page` and
+ *           `meta.total` are null, the count query is skipped, and
+ *           `meta.next_cursor` is null on the last page.
  *       - in: query
  *         name: channel
  *         schema:
@@ -81,7 +87,24 @@ const MAX_PAGE = 10_000;
  *                     required: [id, video_id, title, summary, source, category, url, thumbnail_url, published_at]
  *                 meta:
  *                   type: object
- *                   required: [page, page_size, total, has_more]
+ *                   required: [page, page_size, total, has_more, next_cursor]
+ *                   properties:
+ *                     page:
+ *                       type: integer
+ *                       nullable: true
+ *                       description: Page number in offset mode; null in cursor mode
+ *                     page_size:
+ *                       type: integer
+ *                     total:
+ *                       type: integer
+ *                       nullable: true
+ *                       description: Exact total in offset mode; null in cursor mode (no count query)
+ *                     has_more:
+ *                       type: boolean
+ *                     next_cursor:
+ *                       type: string
+ *                       nullable: true
+ *                       description: Opaque keyset cursor for the next page, or null when exhausted
  *       400:
  *         description: Invalid parameters
  *       401:
@@ -89,24 +112,31 @@ const MAX_PAGE = 10_000;
  */
 router.get('/', async (req: Request, res: Response) => {
   try {
-    const { category, channel, page, page_size, limit, from, to, q } = req.query;
+    const { category, channel, page, page_size, limit, from, to, q, cursor } = req.query;
 
     const { term: searchTerm, error: searchError } = parseSearchQuery(q);
     if (searchError) {
       return res.status(400).json({ error: searchError });
     }
 
-    const parsedPageSize = parsePositiveInt(page_size, parsePositiveInt(limit, DEFAULT_PAGE_SIZE));
-    if (Number.isNaN(parsedPageSize) || parsedPageSize > MAX_PAGE_SIZE) {
-      return res.status(400).json({ error: `page_size must be a positive integer up to ${MAX_PAGE_SIZE}` });
+    if (cursor !== undefined && page !== undefined) {
+      return res.status(400).json({ error: 'use either page or cursor, not both' });
     }
 
-    const parsedPage = parsePositiveInt(page, 1);
-    if (Number.isNaN(parsedPage)) {
-      return res.status(400).json({ error: 'page must be a positive integer' });
+    const pagination = parsePagination({
+      pageRaw: page,
+      pageSizeRaw: page_size,
+      limitRaw: limit,
+      clampPageSize: false,
+    });
+    if ('error' in pagination) {
+      return res.status(400).json({ error: pagination.error });
     }
-    if (parsedPage > MAX_PAGE) {
-      return res.status(400).json({ error: `page must not exceed ${MAX_PAGE}` });
+    const { page: parsedPage, pageSize: parsedPageSize } = pagination;
+
+    const { cursor: parsedCursor, error: cursorError } = parseCursor(cursor);
+    if (cursorError) {
+      return res.status(400).json({ error: cursorError });
     }
 
     const { fromDate, toDate, error: dateError } = parseDateRange(from, to);
@@ -133,42 +163,101 @@ router.get('/', async (req: Request, res: Response) => {
       where.publishedAt = publishedAtFilter;
     }
 
-    if (searchTerm && searchTerm.length > 0) {
-      where.OR = [
-        { title: { contains: searchTerm, mode: 'insensitive' } },
-        { description: { contains: searchTerm, mode: 'insensitive' } },
-        { channelTitle: { contains: searchTerm, mode: 'insensitive' } },
-      ];
+    const searchOr: Prisma.VideoWhereInput[] | undefined =
+      searchTerm && searchTerm.length > 0
+        ? [
+            { title: { contains: searchTerm, mode: 'insensitive' } },
+            { description: { contains: searchTerm, mode: 'insensitive' } },
+            { channelTitle: { contains: searchTerm, mode: 'insensitive' } },
+          ]
+        : undefined;
+
+    if (parsedCursor) {
+      // Keyset predicate for the (publishedAt desc, id desc) order, combined
+      // with the search predicate as AND siblings so neither clobbers the other.
+      const keyset: Prisma.VideoWhereInput = {
+        OR: [
+          { publishedAt: { lt: parsedCursor.date } },
+          { publishedAt: parsedCursor.date, id: { lt: parsedCursor.id } },
+        ],
+      };
+      where.AND = searchOr ? [{ OR: searchOr }, keyset] : [keyset];
+    } else if (searchOr) {
+      where.OR = searchOr;
+    }
+
+    const toMetaVideo = (v: {
+      id: number;
+      videoId: string;
+      title: string;
+      description: string | null;
+      channelTitle: string;
+      category: string[];
+      url: string;
+      thumbnailUrl: string | null;
+      publishedAt: Date;
+    }) => ({
+      id: v.id,
+      video_id: v.videoId,
+      title: v.title,
+      summary: v.description,
+      source: v.channelTitle,
+      category: v.category,
+      url: v.url,
+      thumbnail_url: v.thumbnailUrl,
+      published_at: v.publishedAt,
+    });
+
+    // Cursor mode: no count query. One extra row decides has_more/next_cursor.
+    if (parsedCursor) {
+      const rows = await prisma.video.findMany({
+        orderBy: [{ publishedAt: 'desc' }, { id: 'desc' }],
+        take: parsedPageSize + 1,
+        where,
+      });
+      const hasMore = rows.length > parsedPageSize;
+      const dataRows = hasMore ? rows.slice(0, parsedPageSize) : rows;
+      const lastRow = dataRows[dataRows.length - 1];
+      const nextCursor = hasMore && lastRow ? encodeCursor(lastRow.publishedAt, lastRow.id) : null;
+
+      res.set('Cache-Control', 'private, max-age=300');
+      return res.json({
+        data: dataRows.map(toMetaVideo),
+        meta: {
+          page: null,
+          page_size: parsedPageSize,
+          total: null,
+          has_more: hasMore,
+          next_cursor: nextCursor,
+        },
+      });
     }
 
     const [videos, total] = await Promise.all([
       prisma.video.findMany({
         orderBy: [{ publishedAt: 'desc' }, { id: 'desc' }],
         take: parsedPageSize,
-        skip: (parsedPage - 1) * parsedPageSize,
+        skip: pagination.skip,
         where,
       }),
       prisma.video.count({ where }),
     ]);
 
+    const hasMore = parsedPage * parsedPageSize < total;
+    const lastVideo = videos[videos.length - 1];
+    // Page mode can still bootstrap cursor pagination: return the keyset
+    // position of the last row so a client can switch to `cursor=`.
+    const nextCursor = hasMore && lastVideo ? encodeCursor(lastVideo.publishedAt, lastVideo.id) : null;
+
     res.set('Cache-Control', 'private, max-age=300');
     res.json({
-      data: videos.map((v) => ({
-        id: v.id,
-        video_id: v.videoId,
-        title: v.title,
-        summary: v.description,
-        source: v.channelTitle,
-        category: v.category,
-        url: v.url,
-        thumbnail_url: v.thumbnailUrl,
-        published_at: v.publishedAt,
-      })),
+      data: videos.map(toMetaVideo),
       meta: {
         page: parsedPage,
         page_size: parsedPageSize,
         total,
-        has_more: parsedPage * parsedPageSize < total,
+        has_more: hasMore,
+        next_cursor: nextCursor,
       },
     });
   } catch (error) {
