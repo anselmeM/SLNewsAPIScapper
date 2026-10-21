@@ -31,7 +31,9 @@ const ARTICLE_META_SELECT = {
  *     description: |
  *       Link + summary model: returns article metadata only — headline,
  *       summary, source, category, published date and the link back to the
- *       publisher. Full text is never exposed to API customers.
+ *       publisher. Full text is never exposed to API customers. Undated items
+ *       (no parseable published date) are excluded from this sellable feed;
+ *       they remain visible on the internal `/api/news` surface.
  *     security:
  *       - bearerAuth: []
  *     parameters:
@@ -193,7 +195,9 @@ router.get('/', async (req: Request, res: Response) => {
     // category: string[] via repeated params or comma-separated values
     const categories = parseCategories(category);
 
-    const where: Prisma.ArticleWhereInput = {};
+    // Sellable feeds never surface rows whose published date could not be
+    // parsed; the pinned internal app still sees them via /api/news.
+    const where: Prisma.ArticleWhereInput = { pubDateSource: { not: 'missing' } };
 
     if (source) {
       const sourceStr = String(source);

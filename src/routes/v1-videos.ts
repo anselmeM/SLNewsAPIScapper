@@ -12,7 +12,11 @@ const router = Router();
  * /v1/videos:
  *   get:
  *     summary: List news videos (versioned business contract)
- *     description: Returns paginated video news metadata and playback URLs for Sierra Leone broadcasters.
+ *     description: |
+ *       Returns paginated video news metadata and playback URLs for Sierra Leone
+ *       broadcasters. Videos whose published date could not be parsed are
+ *       excluded from this sellable feed; they remain visible on the internal
+ *       `/api/videos` surface.
  *     security:
  *       - bearerAuth: []
  *     parameters:
@@ -146,7 +150,9 @@ router.get('/', async (req: Request, res: Response) => {
 
     const categories = parseCategories(category);
 
-    const where: Prisma.VideoWhereInput = {};
+    // Sellable feeds never surface rows whose published date could not be
+    // parsed; the pinned internal app still sees them via /api/videos.
+    const where: Prisma.VideoWhereInput = { publishedAtSource: { not: 'missing' } };
 
     if (channel) {
       where.channelTitle = { contains: String(channel), mode: 'insensitive' };

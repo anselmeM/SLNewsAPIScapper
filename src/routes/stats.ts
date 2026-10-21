@@ -52,27 +52,39 @@ function freshness(latestIngestedAt: Date | null | undefined): Freshness {
  */
 router.get('/', async (_req: Request, res: Response) => {
   try {
-    const [totalArticles, articlesBySource, latestArticle, totalVideos, videosByChannel, latestVideo] =
-      await Promise.all([
-        prisma.article.count(),
-        prisma.article.groupBy({
-          by: ['source'],
-          _count: { source: true },
-        }),
-        prisma.article.findFirst({
-          orderBy: { pubDate: 'desc' },
-          select: { pubDate: true, createdAt: true },
-        }),
-        prisma.video.count(),
-        prisma.video.groupBy({
-          by: ['channelTitle'],
-          _count: { channelTitle: true },
-        }),
-        prisma.video.findFirst({
-          orderBy: { publishedAt: 'desc' },
-          select: { publishedAt: true, createdAt: true },
-        }),
-      ]);
+    const [
+      totalArticles,
+      articlesBySource,
+      latestArticle,
+      missingDateArticles,
+      emptyContentArticles,
+      totalVideos,
+      videosByChannel,
+      latestVideo,
+      missingDateVideos,
+    ] = await Promise.all([
+      prisma.article.count(),
+      prisma.article.groupBy({
+        by: ['source'],
+        _count: { source: true },
+      }),
+      prisma.article.findFirst({
+        orderBy: { pubDate: 'desc' },
+        select: { pubDate: true, createdAt: true },
+      }),
+      prisma.article.count({ where: { pubDateSource: 'missing' } }),
+      prisma.article.count({ where: { contentSource: { in: ['empty', 'summary'] } } }),
+      prisma.video.count(),
+      prisma.video.groupBy({
+        by: ['channelTitle'],
+        _count: { channelTitle: true },
+      }),
+      prisma.video.findFirst({
+        orderBy: { publishedAt: 'desc' },
+        select: { publishedAt: true, createdAt: true },
+      }),
+      prisma.video.count({ where: { publishedAtSource: 'missing' } }),
+    ]);
 
     const articleSourceCounts: Record<string, number> = {};
     for (const group of articlesBySource) {
@@ -94,12 +106,15 @@ router.get('/', async (_req: Request, res: Response) => {
         by_source: articleSourceCounts,
         latest_pub_date: latestArticle?.pubDate ?? null,
         latest_ingested_at: latestArticle?.createdAt ?? null,
+        missing_date: missingDateArticles,
+        empty_content: emptyContentArticles,
       },
       videos: {
         total: totalVideos,
         by_channel: videoChannelCounts,
         latest_published_at: latestVideo?.publishedAt ?? null,
         latest_ingested_at: latestVideo?.createdAt ?? null,
+        missing_date: missingDateVideos,
       },
       freshness: {
         articles: freshness(latestArticle?.createdAt),

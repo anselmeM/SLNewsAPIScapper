@@ -52,7 +52,14 @@ beforeEach(() => {
   articleIngestedAt = new Date(Date.now() - 60_000);
   videoIngestedAt = new Date(Date.now() - 120_000);
 
-  articleCount.mockResolvedValue(100);
+  articleCount
+    .mockReset()
+    .mockImplementation((args?: { where?: { pubDateSource?: string; contentSource?: unknown } }) => {
+      // Three article counts: total, missing_date, empty_content.
+      if (args?.where?.pubDateSource === 'missing') return Promise.resolve(7);
+      if (args?.where?.contentSource) return Promise.resolve(3);
+      return Promise.resolve(100);
+    });
   articleGroupBy.mockResolvedValue([
     { source: 'The Sierra Leone Telegraph', _count: { source: 70 } },
     { source: 'Politico SL', _count: { source: 30 } },
@@ -62,7 +69,11 @@ beforeEach(() => {
     createdAt: articleIngestedAt,
   });
 
-  videoCount.mockResolvedValue(25);
+  videoCount.mockReset().mockImplementation((args?: { where?: { publishedAtSource?: string } }) => {
+    // Two video counts: total, missing_date.
+    if (args?.where?.publishedAtSource === 'missing') return Promise.resolve(2);
+    return Promise.resolve(25);
+  });
   videoGroupBy.mockResolvedValue([
     { channelTitle: 'AYV News Sierra Leone', _count: { channelTitle: 15 } },
     { channelTitle: 'SLBC National TV', _count: { channelTitle: 10 } },
@@ -96,6 +107,13 @@ describe('GET /api/stats', () => {
     expect(res.body.videos.total).toBe(25);
     expect(res.body.videos.by_channel['AYV News Sierra Leone']).toBe(15);
     expect(res.body.timestamp).toBeDefined();
+    // Provenance/quarantine counters for operators.
+    expect(res.body.articles.missing_date).toBe(7);
+    expect(res.body.articles.empty_content).toBe(3);
+    expect(res.body.videos.missing_date).toBe(2);
+    expect(articleCount).toHaveBeenCalledWith({ where: { pubDateSource: 'missing' } });
+    expect(articleCount).toHaveBeenCalledWith({ where: { contentSource: { in: ['empty', 'summary'] } } });
+    expect(videoCount).toHaveBeenCalledWith({ where: { publishedAtSource: 'missing' } });
     // Existing fields are preserved alongside the new sections.
     expect(res.body.articles.latest_ingested_at).toBe(articleIngestedAt.toISOString());
     expect(res.body.videos.latest_ingested_at).toBe(videoIngestedAt.toISOString());

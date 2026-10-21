@@ -4,6 +4,7 @@ import { prisma } from '../db.js';
 import { SIERRA_LEONE_SOURCES } from '../config/sources.js';
 import { runSierraLeoneVideoIngestion } from './video-scraper.js';
 import { normalizeArticleUrl } from '../utils/url.js';
+import { parsePublishedDate } from '../utils/dates.js';
 import { fetchWithRetry, USER_AGENT, sleep } from '../utils/http.js';
 import logger from '../logger.js';
 
@@ -16,9 +17,20 @@ const parser = new Parser();
 const MAX_IMAGE_FETCHES_PER_RUN = 10;
 const BACKFILL_BUDGET_MS = 60_000;
 
+// Content repair is separately bounded: a row stored without a body (legacy
+// 'summary'/current 'empty') is retried at most MAX_CONTENT_ATTEMPTS times, and
+// each run repairs at most MAX_CONTENT_REPAIRS_PER_RUN articles within a 60 s
+// budget so a backlog of broken pages cannot dominate a cycle.
+const MAX_CONTENT_REPAIRS_PER_RUN = 5;
+const CONTENT_REPAIR_BUDGET_MS = 60_000;
+const MAX_CONTENT_ATTEMPTS = 3;
+
 const FEED_TIMEOUT_MS = 15_000;
 const ARTICLE_PAGE_TIMEOUT_MS = 10_000;
 const DEFAULT_INGESTION_DEADLINE_MS = 45 * 60 * 1000;
+
+/** Fallback selector for sitemap rows whose source is no longer configured. */
+const GENERIC_CONTENT_SELECTOR = 'article p, .entry-content p, .post-content p, .article-content p, main p';
 
 function readPositiveIntEnv(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -50,6 +62,10 @@ interface ExistingArticleMeta {
   imageUrl: string | null;
   description: string | null;
   category: string[];
+  source: string;
+  paragraphs: string[];
+  contentSource: string | null;
+  contentAttempts: number;
 }
 
 /** A feed item plus its deduplication key and guaranteed title, resolved once per source. */
@@ -59,18 +75,11 @@ interface PendingItem {
   title: string;
 }
 
-function safeParseDate(dateStr?: string): Date {
-  if (!dateStr) return new Date();
-  let d = new Date(dateStr);
-  if (!isNaN(d.getTime())) return d;
-
-  const cleaned = dateStr
-    .replace(/^(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s*/i, '')
-    .replace(/\s*-\s*(\d{1,2}:\d{2})/, ' $1');
-  d = new Date(cleaned);
-  if (!isNaN(d.getTime())) return d;
-
-  return new Date();
+/** Shared per-run budget for bounded content repairs (feeds + sweep). */
+interface ContentRepairContext {
+  deadlineAt: number;
+  startedAt: number;
+  repairs: number;
 }
 
 function extractRealLink(rawLink: string): string {
@@ -146,6 +155,60 @@ function resolveFeedImage(link: string, feedHtml: string): string | null {
   return src ? absolutizeUrl(src, link) : null;
 }
 
+function contentSelectorForSource(sourceName: string): string {
+  const configured = SIERRA_LEONE_SOURCES.find((source) => source.name === sourceName);
+  return configured?.contentSelector ?? GENERIC_CONTENT_SELECTOR;
+}
+
+function isRepairableContentSource(contentSource: string | null): boolean {
+  return contentSource === 'empty' || contentSource === 'summary';
+}
+
+/** True when a stored article has no body and still has repair attempts left. */
+function needsContentRepair(article: ExistingArticleMeta): boolean {
+  return (
+    isRepairableContentSource(article.contentSource) &&
+    article.contentAttempts < MAX_CONTENT_ATTEMPTS &&
+    article.paragraphs.length === 0
+  );
+}
+
+/** Bounded per-run content repair budget shared by feed backfill and the sweep. */
+function canRepairContent(context: ContentRepairContext): boolean {
+  return (
+    context.repairs < MAX_CONTENT_REPAIRS_PER_RUN &&
+    Date.now() - context.startedAt < CONTENT_REPAIR_BUDGET_MS &&
+    Date.now() < context.deadlineAt
+  );
+}
+
+function contentRepairUpdate(
+  page: { paragraphs: string[]; imageUrl: string | null },
+  article: { imageUrl: string | null },
+  alreadyFilledImage: boolean,
+): Record<string, unknown> {
+  const now = new Date();
+
+  if (page.paragraphs.length > 0) {
+    const update: Record<string, unknown> = {
+      paragraphs: page.paragraphs,
+      contentSource: 'page',
+      contentAttempts: 0,
+      lastContentAttemptAt: now,
+    };
+    // Only rescue the image when it is still missing and this run has not
+    // already found one (the feed image always wins).
+    if (!article.imageUrl && !alreadyFilledImage && page.imageUrl) update.imageUrl = page.imageUrl;
+    return update;
+  }
+
+  return {
+    contentSource: 'empty',
+    contentAttempts: { increment: 1 },
+    lastContentAttemptAt: now,
+  };
+}
+
 /**
  * Fetches an article page once for ingest. Returns both the selector paragraphs
  * and the og:image so a new article costs a single request instead of two.
@@ -191,6 +254,72 @@ async function fetchArticlePageImage(link: string): Promise<string | null> {
   return null;
 }
 
+/**
+ * Bounded repair sweep for rows stored without a body. Runs after the feed pass
+ * (which repairs candidates it happens to see) and before the sitemap walk.
+ * One query, at most MAX_CONTENT_REPAIRS_PER_RUN page fetches, per-row failure
+ * isolation and the shared run deadline.
+ */
+async function repairMissingContent(context: ContentRepairContext): Promise<void> {
+  if (!canRepairContent(context)) return;
+
+  let candidates: Array<{ id: number; link: string; source: string }>;
+  try {
+    candidates = await prisma.article.findMany({
+      where: {
+        contentSource: { in: ['empty', 'summary'] },
+        contentAttempts: { lt: MAX_CONTENT_ATTEMPTS },
+      },
+      orderBy: { createdAt: 'asc' },
+      take: MAX_CONTENT_REPAIRS_PER_RUN,
+      select: { id: true, link: true, source: true },
+    });
+  } catch (err) {
+    logger.error({ err }, 'Failed to load articles needing content repair');
+    return;
+  }
+
+  for (const article of candidates) {
+    if (!canRepairContent(context)) {
+      logger.info(
+        { repaired: context.repairs },
+        'Content repair budget exhausted; remaining rows wait for a later run',
+      );
+      return;
+    }
+
+    try {
+      context.repairs++;
+      const page = await fetchArticlePage(article.link, contentSelectorForSource(article.source));
+
+      if (page.paragraphs.length > 0) {
+        await prisma.article.update({
+          where: { id: article.id },
+          data: {
+            paragraphs: page.paragraphs,
+            contentSource: 'page',
+            contentAttempts: 0,
+            lastContentAttemptAt: new Date(),
+          },
+        });
+        logger.info({ id: article.id, link: article.link }, 'Repaired missing article content');
+      } else {
+        await prisma.article.update({
+          where: { id: article.id },
+          data: {
+            contentSource: 'empty',
+            contentAttempts: { increment: 1 },
+            lastContentAttemptAt: new Date(),
+          },
+        });
+        logger.warn({ id: article.id, link: article.link }, 'Content repair attempt found no body');
+      }
+    } catch (err) {
+      logger.warn({ id: article.id, link: article.link, err }, 'Content repair failed');
+    }
+  }
+}
+
 export async function runSierraLeoneIngestion(options: IngestionOptions = {}) {
   logger.info('Starting Sierra Leone Ingestion Cycle');
 
@@ -207,6 +336,8 @@ export async function runSierraLeoneIngestion(options: IngestionOptions = {}) {
   let imageFetches = 0;
   const canFetchImage = () =>
     imageFetches < MAX_IMAGE_FETCHES_PER_RUN && Date.now() - runStartedAt < BACKFILL_BUDGET_MS;
+
+  const contentRepairs: ContentRepairContext = { deadlineAt, startedAt: Date.now(), repairs: 0 };
 
   for (const source of SIERRA_LEONE_SOURCES) {
     if (deadlineReached()) {
@@ -235,7 +366,17 @@ export async function runSierraLeoneIngestion(options: IngestionOptions = {}) {
       if (pendingItems.length > 0) {
         const existingArticles = await prisma.article.findMany({
           where: { link: { in: pendingItems.map((pending) => pending.link) } },
-          select: { id: true, link: true, imageUrl: true, description: true, category: true },
+          select: {
+            id: true,
+            link: true,
+            imageUrl: true,
+            description: true,
+            category: true,
+            source: true,
+            paragraphs: true,
+            contentSource: true,
+            contentAttempts: true,
+          },
         });
         for (const article of existingArticles) existingByLink.set(article.link, article);
       }
@@ -270,6 +411,14 @@ export async function runSierraLeoneIngestion(options: IngestionOptions = {}) {
               updateData.category = item.categories;
             }
 
+            // Repair bodies that were stored empty (or legacy 'summary') while we
+            // already have the feed item's article in hand.
+            if (needsContentRepair(existing) && canRepairContent(contentRepairs)) {
+              contentRepairs.repairs++;
+              const page = await fetchArticlePage(link, contentSelectorForSource(existing.source));
+              Object.assign(updateData, contentRepairUpdate(page, existing, updateData.imageUrl !== undefined));
+            }
+
             if (Object.keys(updateData).length > 0) {
               await prisma.article.update({ where: { id: existing.id }, data: updateData });
               logger.trace({ id: existing.id, title: title.slice(0, 50) }, 'Backfilled article meta');
@@ -283,10 +432,14 @@ export async function runSierraLeoneIngestion(options: IngestionOptions = {}) {
           // One request for both paragraphs and og:image.
           const page = await fetchArticlePage(link, source.contentSelector);
           const feedHtml = getFeedContentHtml(item);
-          const paragraphs = page.paragraphs.length > 0 ? page.paragraphs : paragraphsFromHtml(feedHtml);
+          const feedParagraphs = paragraphsFromHtml(feedHtml);
+          const paragraphs = page.paragraphs.length > 0 ? page.paragraphs : feedParagraphs;
+          const contentSource = page.paragraphs.length > 0 ? 'page' : feedParagraphs.length > 0 ? 'feed' : 'empty';
+          const contentAttempts = contentSource === 'empty' ? 1 : 0;
           // Prefer the feed image (free); fall back to the page og:image.
           const imageUrl = resolveFeedImage(link, feedHtml) ?? page.imageUrl;
           const description = extractDescription(item);
+          const published = parsePublishedDate(item.pubDate);
 
           // Upsert instead of create: if an overlapping scrape run ingested this
           // link in the meantime, this becomes a no-op instead of a unique-constraint crash.
@@ -296,12 +449,17 @@ export async function runSierraLeoneIngestion(options: IngestionOptions = {}) {
             create: {
               title: title,
               link: link,
-              pubDate: safeParseDate(item.pubDate),
+              pubDate: published.date,
+              pubDateSource: published.source,
+              pubDateRaw: published.raw,
               author: item.creator || source.name,
               description: description,
               category: item.categories || [],
               imageUrl: imageUrl,
               paragraphs: paragraphs,
+              contentSource,
+              contentAttempts,
+              lastContentAttemptAt: contentAttempts > 0 ? new Date() : null,
               source: source.name,
             },
           });
@@ -317,6 +475,9 @@ export async function runSierraLeoneIngestion(options: IngestionOptions = {}) {
   }
 
   logger.info('Article Ingestion Cycle Complete');
+
+  // Bounded sweep for rows stored without a body that this run's feeds did not see.
+  await repairMissingContent(contentRepairs);
 
   // Sitemap fallback: catch articles the RSS feed may have missed
   await scrapeTelegraphFromSitemap(deadlineAt);
@@ -460,15 +621,19 @@ async function scrapeTelegraphFromSitemap(deadlineAt: number): Promise<void> {
             page$('meta[property="article:author"]').attr('content') ||
             page$('.entry-author a').text().trim() ||
             'The Sierra Leone Telegraph';
-          const pubDateStr =
+          const pubDateRaw =
             page$('meta[property="article:published_time"]').attr('content') ||
             page$('time.entry-date').attr('datetime') ||
             '';
+          const published = parsePublishedDate(pubDateRaw);
           const paragraphs: string[] = [];
           page$('.entry-content p, .entry-content h2').each((_, el) => {
             const text = page$(el).text().trim();
             if (text && text.length > 40) paragraphs.push(text);
           });
+          // No body found means an empty row, never a fabricated summary paragraph.
+          const contentSource = paragraphs.length > 0 ? 'page' : 'empty';
+          const contentAttempts = contentSource === 'empty' ? 1 : 0;
 
           await prisma.article.upsert({
             where: { link: url },
@@ -476,12 +641,17 @@ async function scrapeTelegraphFromSitemap(deadlineAt: number): Promise<void> {
             create: {
               title: title.slice(0, 500),
               link: url,
-              pubDate: pubDateStr ? new Date(pubDateStr) : new Date(),
+              pubDate: published.date,
+              pubDateSource: published.source,
+              pubDateRaw: published.raw,
               author: author.slice(0, 200),
               description: description.slice(0, 500),
               category: [],
               imageUrl,
-              paragraphs: paragraphs.length > 0 ? paragraphs : [description.slice(0, 500) || title],
+              paragraphs,
+              contentSource,
+              contentAttempts,
+              lastContentAttemptAt: contentAttempts > 0 ? new Date() : null,
               source: 'The Sierra Leone Telegraph',
             },
           });

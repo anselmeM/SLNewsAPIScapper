@@ -248,6 +248,41 @@ describe('GET /v1/videos', () => {
       has_more: false,
       next_cursor: null,
     });
+    // Sellable feed excludes rows whose published date could not be parsed.
+    expect(prisma.video.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ publishedAtSource: { not: 'missing' } }),
+      }),
+    );
+  });
+
+  it('excludes undated videos on /v1 but keeps them on the legacy /api feed', async () => {
+    const mockFindMany = prisma.video.findMany as ReturnType<typeof vi.fn>;
+    const mockCount = prisma.video.count as ReturnType<typeof vi.fn>;
+    mockFindMany.mockClear();
+    mockCount.mockClear();
+
+    mockFindMany.mockResolvedValueOnce([]);
+    mockCount.mockResolvedValueOnce(0);
+
+    await app.get('/v1/videos').set('Authorization', 'Bearer test-key-123');
+    const v1Args = mockFindMany.mock.calls[0][0];
+    expect(v1Args.where.publishedAtSource).toEqual({ not: 'missing' });
+    expect(mockCount.mock.calls[0][0]).toEqual({
+      where: expect.objectContaining({ publishedAtSource: { not: 'missing' } }),
+    });
+
+    mockFindMany.mockClear();
+    mockCount.mockClear();
+    mockFindMany.mockResolvedValueOnce(mockVideos);
+    mockCount.mockResolvedValueOnce(1);
+
+    const legacyRes = await app.get('/api/videos').set('Authorization', 'Bearer test-key-123');
+    expect(legacyRes.status).toBe(200);
+    const apiArgs = mockFindMany.mock.calls[0][0];
+    expect(apiArgs.where).toEqual({});
+    expect(apiArgs.where.publishedAtSource).toBeUndefined();
+    expect(mockCount.mock.calls[0][0].where.publishedAtSource).toBeUndefined();
   });
 
   it('returns a bootstrap cursor from page mode when more results exist', async () => {
