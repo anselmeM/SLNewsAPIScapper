@@ -49,17 +49,17 @@ Credentials carry scopes: **`v1:read`** for the sellable `/v1/*` routes and **`i
 | GET    | `/api/news/:id`    | Bearer · `internal:read` | **Internal** full article row by ID, including `paragraphs`                                                                    |
 | GET    | `/api/videos`      | Bearer · `internal:read` | **Internal** videos (legacy page/limit pagination; `channel`, `category`, `q`)                                                 |
 | GET    | `/api/videos/:id`  | Bearer · `internal:read` | Video by numeric ID or YouTube video ID                                                                                        |
-| POST   | `/api/videos/sync` | Bearer · `internal:read` | Trigger a synchronous video feed ingestion                                                                                     |
+| POST   | `/api/videos/sync` | Bearer · `internal:read` | Trigger a synchronous video feed ingestion (`409` if already running, `429` during cooldown)                                   |
 | GET    | `/api/stats`       | Bearer · `internal:read` | Aggregate counts, runtime metrics, freshness and data-quality counters                                                         |
 | GET    | `/api/health`      | Public                   | **Liveness** — 200 while the process is alive; never queries the database                                                      |
 | GET    | `/api/ready`       | Public                   | **Readiness** — cached database probe; 503 when the database is unreachable                                                    |
 | GET    | `/v1/news`         | Bearer · `v1:read`       | **Sellable** paginated article metadata + summary (`page`/`cursor`, `page_size`, `source`, `category`, `from`, `to`, `q`)      |
 | GET    | `/v1/videos`       | Bearer · `v1:read`       | **Sellable** paginated video metadata + playback URLs (`page`/`cursor`, `page_size`, `channel`, `category`, `from`, `to`, `q`) |
 | GET    | `/v1/stats`        | Bearer · `v1:read`       | Same aggregate stats as `/api/stats`                                                                                           |
-| GET    | `/docs`            | Public                   | Swagger UI (OpenAPI document)                                                                                                  |
-| GET    | `/v1/docs`         | Public                   | Swagger UI, versioned alias                                                                                                    |
+| GET    | `/docs`            | Public                   | Swagger UI (public; own `DOCS_RATE_LIMIT_MAX` limiter)                                                                         |
+| GET    | `/v1/docs`         | Public                   | Swagger UI, versioned alias (same docs limiter)                                                                                |
 
-Public routes (`/`, `/docs`, `/v1/docs`, `/api/health`, `/api/ready`) need no credentials. Both probes (`/api/health`, `/api/ready`) are exempt from the rate limiter.
+Public routes (`/`, `/docs`, `/v1/docs`, `/api/health`, `/api/ready`) need no credentials. Both probes (`/api/health`, `/api/ready`) are exempt from the rate limiter; the docs UI has its own limiter (see [Rate limiting](#rate-limiting)).
 
 ### API keys and scopes
 
@@ -141,6 +141,22 @@ GET /v1/news?page_size=50&cursor=<opaque>   # pass meta.next_cursor from a page-
 
 The legacy `/api/news` and `/api/videos` routes stay page-based for the pinned SLNews app: `limit` above 100 is still clamped silently as before, but `page` is capped at 10,000 and absurd/deep offsets now return `400` instead of a Prisma overflow `500`.
 
+### Date filters
+
+`from` / `to` accept ISO dates or date-times on the list routes. Validation is strict:
+
+- impossible calendar dates such as `2026-02-30`, `2026-13-01` or `2026-00-10` return `400` instead of being silently rolled over by `Date`;
+- a date-only `to` (e.g. `to=2026-08-07`) means "end of that UTC day" (23:59:59.999) and that adjustment happens **before** the `from > to` check, so a same-day window like `from=2026-08-07T12:00:00Z&to=2026-08-07` is valid;
+- `from` later than `to` returns `400`.
+
+### Video sync trigger
+
+`POST /api/videos/sync` runs a full video ingestion synchronously (the hourly cron is the normal path). Overlap is guarded:
+
+- a second request while a sync is in flight returns `409 { "error": "Video sync already in progress" }`;
+- after a run finishes, a `VIDEO_SYNC_COOLDOWN_MS` cooldown (default 30 s; `0` disables it) applies, returning `429 { "error": "Video sync is cooling down", "retry_after_seconds": n }` with a matching `Retry-After` header;
+- the guard is in-process state, so keep the API to a single instance (as the blueprint does).
+
 ### Rate limiting
 
 - **100 requests / 15 minutes** per caller by default.
@@ -148,6 +164,7 @@ The legacy `/api/news` and `/api/videos` routes stay page-based for the pinned S
 - Configurable with `RATE_LIMIT_MAX` and `RATE_LIMIT_WINDOW_MS`.
 - `TRUST_PROXY_HOPS` (default `1`) tells Express how many reverse-proxy hops to trust for `X-Forwarded-For`; Render terminates TLS in front of the app, so `1` is correct there.
 - Exceeding the limit returns `429` with `Retry-After` and `RateLimit-*` headers.
+- The docs UI is throttled separately: `/docs` and `/v1/docs` use their own limiter (`DOCS_RATE_LIMIT_MAX`, default **300 per window**) and are skipped by the API limiter, so loading Swagger never consumes a caller's API budget. `DOCS_RATE_LIMIT_MAX=0` is treated as invalid and falls back to the default; the window is shared via `RATE_LIMIT_WINDOW_MS`.
 - The limiter's store is in-memory: run a **single instance** (as the blueprint does); with multiple instances each gets its own budget.
 
 ### Caching and CORS
@@ -253,8 +270,10 @@ Two suites, split by whether they need a database:
 | `CLERK_SCOPES`             | No                | `internal:read,v1:read` | Scopes granted to verified Clerk session JWTs (narrow in production)        |
 | `API_KEY_CACHE_TTL_MS`     | No                | `30000` (30 s)          | Customer-key verification cache TTL; bounds revocation/scope-change lag     |
 | `TRUST_PROXY_HOPS`         | No                | `1`                     | Reverse-proxy hops trusted for `X-Forwarded-For`                            |
-| `RATE_LIMIT_MAX`           | No                | `100`                   | Max requests per window per caller                                          |
-| `RATE_LIMIT_WINDOW_MS`     | No                | `900000` (15 min)       | Rate-limit window in milliseconds                                           |
+| `RATE_LIMIT_MAX`           | No                | `100`                   | Max API requests per window per caller                                      |
+| `RATE_LIMIT_WINDOW_MS`     | No                | `900000` (15 min)       | Rate-limit window shared by the API and docs limiters                       |
+| `DOCS_RATE_LIMIT_MAX`      | No                | `300`                   | Max `/docs` + `/v1/docs` requests per window (separate budget)              |
+| `VIDEO_SYNC_COOLDOWN_MS`   | No                | `30000` (30 s)          | Cooldown after `POST /api/videos/sync`; `0` disables it                     |
 | `FRESHNESS_MAX_AGE_MS`     | No                | `7200000` (2 h)         | Ingestion lag above which `/api/stats` marks a feed `stale`                 |
 | `INGESTION_DEADLINE_MS`    | No                | `2700000` (45 min)      | Wall-clock budget per ingestion cycle; stops starting new work when reached |
 | `SCRAPER_USER_AGENT`       | No                | browser-like Chrome UA  | User-Agent override for all scraper HTTP requests                           |
@@ -309,6 +328,19 @@ docker run --rm -p 3000:3000 --env-file .env sl-news-api
 
 The image runs as a non-root user with `NODE_ENV=production`, and `/docs` resolves the OpenAPI spec from the compiled `dist/routes/*.js` in the image.
 
+## Operations
+
+- **Graceful shutdown.** On `SIGTERM`/`SIGINT` the server stops accepting connections and drains idle ones, then disconnects Prisma and exits `0`. A 10 s force-exit fallback is `unref()`ed and cleared on the graceful path, duplicate signals are ignored, and a failed Prisma disconnect still exits `0` (logged as an error). The handler is exported as `createShutdownHandler` and unit-tested.
+- **Fatal errors.** `unhandledRejection` and `uncaughtException` are logged (name/message/stack, no request bodies or credentials) and exit `1` instead of leaving a half-alive process that the platform keeps routing traffic to.
+- **CORS.** `CORS_ORIGIN` unset falls back to `*` for backward compatibility, but a production startup now logs **one warning** telling the operator to set it. Configure `CORS_ORIGIN` in production.
+- **Logging.** Production logs are JSON (pino); `pino-pretty` is a **devDependency** used only for local development and is never loaded in production (it is not needed at runtime).
+
+## Repository hygiene
+
+- **License:** MIT — see [LICENSE](LICENSE).
+- **Line endings:** `.gitattributes` sets `* text=auto` so text files are normalized to LF in the repository (checkouts still honour `core.autocrlf` on Windows). Binary assets (images, fonts) are marked `binary`, and `*.patch` is `-text` so the SLNews app patch stays byte-for-byte.
+- **Local formatting:** `.prettierrc` uses `endOfLine: auto`, so the CRLF working tree on Windows does not break `npm run lint`.
+
 ## CI
 
 `.github/workflows/ci.yml` runs on pushes to `master`/`main` and on pull requests:
@@ -321,3 +353,7 @@ The image runs as a non-root user with `NODE_ENV=production`, and `/docs` resolv
 - `audit` — `npm audit --omit=dev --audit-level=high`
 
 All jobs run with `contents: read`, per-job timeouts, and workflow-level `concurrency` with `cancel-in-progress`. Render's `autoDeployTrigger: checksPass` means `master` only deploys after these checks are green.
+
+## License
+
+MIT — see [LICENSE](LICENSE). Copyright (c) 2026 SLNews Scraper API contributors.
