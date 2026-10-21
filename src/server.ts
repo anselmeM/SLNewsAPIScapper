@@ -16,16 +16,7 @@ import { prisma } from './db.js';
 import { swaggerSpec } from './config/swagger.js';
 import { describeAuthentication, requireAuthentication } from './auth/requireAuthentication.js';
 import logger, { LOG_REDACTION } from './logger.js';
-
-/**
- * Positive integer read from the environment, falling back when the value is
- * missing, non-numeric, or out of range.
- */
-function envPositiveInt(raw: string | undefined, fallback: number): number {
-  if (raw === undefined || raw.trim() === '') return fallback;
-  const value = Number(raw);
-  return Number.isFinite(value) && value > 0 ? Math.trunc(value) : fallback;
-}
+import { positiveIntFromEnv, requestIdMiddleware, runtimeMetrics } from './observability.js';
 
 /**
  * Express `trust proxy` hop count. Render (and any other reverse proxy) sits in
@@ -71,22 +62,37 @@ app.use(
   }),
 );
 
+// Correlation ids must exist before the logger and before any middleware that
+// can throw (body-parser included), so access logs and 4xx/5xx bodies share the
+// same id, and every finished response is counted.
+app.use(requestIdMiddleware);
+
 app.use(express.json());
 
 if (process.env.NODE_ENV !== 'test') {
   // Every request is logged with its (serialised) headers, so the credentials in
-  // them are redacted before the record is written.
-  app.use(pinoHttp({ logger, redact: LOG_REDACTION }));
+  // them are redacted before the record is written. The access log reuses the
+  // correlation id set above instead of pino-http generating its own.
+  app.use(
+    pinoHttp<express.Request, express.Response>({
+      logger,
+      redact: LOG_REDACTION,
+      genReqId: (req) => req.id,
+    }),
+  );
 }
 
 const limiter = rateLimit({
-  windowMs: envPositiveInt(process.env.RATE_LIMIT_WINDOW_MS, 15 * 60 * 1000),
-  max: envPositiveInt(process.env.RATE_LIMIT_MAX, 100),
+  windowMs: positiveIntFromEnv(process.env.RATE_LIMIT_WINDOW_MS, 15 * 60 * 1000),
+  max: positiveIntFromEnv(process.env.RATE_LIMIT_MAX, 100),
   keyGenerator: rateLimitKey,
-  // Health checks must never be throttled: Render probes /api/health every
+  // Health/readiness probes must never be throttled: Render probes them every
   // ~10s, and a busy API consumer could otherwise trip the limit and take the
   // health check (and thus the whole service) down with it.
-  skip: (req) => req.originalUrl.split('?')[0] === '/api/health',
+  skip: (req) => {
+    const path = req.originalUrl.split('?')[0];
+    return path === '/api/health' || path === '/api/ready';
+  },
   message: { error: 'Too many requests, please try again later' },
   standardHeaders: true,
   legacyHeaders: false,
@@ -105,6 +111,7 @@ app.get('/', (_req, res) => {
       video: '/api/videos/:id',
       stats: '/api/stats',
       health: '/api/health',
+      ready: '/api/ready',
       docs: '/docs',
     },
   });
@@ -112,10 +119,10 @@ app.get('/', (_req, res) => {
 
 app.use(['/docs', '/v1/docs'], swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
-// Health probes run every ~10s. Caching the database probe briefly keeps the
-// health check from multiplying database load, and hides a single transient
-// blip from the platform's restart logic. The TTL is zero when NODE_ENV=test so
-// each request performs its own probe (tests need deterministic responses).
+// The readiness probe runs every ~10s. Caching the database probe briefly keeps
+// it from multiplying database load, and hides a single transient blip from the
+// platform's restart logic. The TTL is zero when NODE_ENV=test so each request
+// performs its own probe (tests need deterministic responses).
 const HEALTH_CACHE_TTL_MS = process.env.NODE_ENV === 'test' ? 0 : 5_000;
 let healthProbe: { ok: boolean; checkedAt: number } | undefined;
 
@@ -131,12 +138,27 @@ async function databaseIsReachable(): Promise<boolean> {
   return ok;
 }
 
-app.get('/api/health', async (_req, res) => {
+// Liveness only: answers "is the process up?" and must never touch the database,
+// so a database outage cannot make the platform kill a healthy process.
+app.get('/api/health', (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({
+    status: 'ok',
+    service: 'sl-news-api',
+    uptime_seconds: runtimeMetrics().uptime_seconds,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// Readiness: answers "can this instance serve traffic?" — currently whether the
+// cached database probe succeeds. A failure here means the load balancer should
+// route around this instance, not restart it.
+app.get('/api/ready', async (_req, res) => {
   res.set('Cache-Control', 'no-store');
   const connected = await databaseIsReachable();
   const timestamp = new Date().toISOString();
   if (connected) {
-    res.json({ status: 'ok', database: 'connected', timestamp });
+    res.json({ status: 'ready', database: 'connected', timestamp });
   } else {
     res.status(503).json({ status: 'degraded', database: 'disconnected', timestamp });
   }
@@ -152,9 +174,10 @@ app.use(['/api/stats', '/v1/stats'], requireAuthentication, statsRouter);
 app.use('/v1/news', requireAuthentication, v1Router);
 app.use('/v1/videos', requireAuthentication, v1VideosRouter);
 
-// JSON 404 for unknown routes (Express's default is an HTML "Cannot GET" page)
-app.use((_req, res) => {
-  res.status(404).json({ error: 'Not found' });
+// JSON 404 for unknown routes (Express's default is an HTML "Cannot GET" page).
+// The correlation id lets a caller quote one id when reporting a bad request.
+app.use((req, res) => {
+  res.status(404).json({ error: 'Not found', request_id: req.id });
 });
 
 /**
@@ -178,15 +201,19 @@ const handleError: express.ErrorRequestHandler = (err, req, res, next) => {
   const status =
     typeof candidateStatus === 'number' && candidateStatus >= 400 && candidateStatus <= 599 ? candidateStatus : 500;
   const path = req.originalUrl.split('?')[0];
+  const request_id = req.id;
 
   if (status < 500) {
-    logger.warn({ name: error.name, message: error.message, status, path }, 'Request rejected');
-    res.status(status).json({ error: status === 400 ? 'Bad request' : 'Request failed' });
+    logger.warn({ name: error.name, message: error.message, status, path, request_id }, 'Request rejected');
+    res.status(status).json({ error: status === 400 ? 'Bad request' : 'Request failed', request_id });
     return;
   }
 
-  logger.error({ name: error.name, message: error.message, stack: error.stack, status, path }, 'Unhandled error');
-  res.status(status).json({ error: 'Internal server error' });
+  logger.error(
+    { name: error.name, message: error.message, stack: error.stack, status, path, request_id },
+    'Unhandled error',
+  );
+  res.status(status).json({ error: 'Internal server error', request_id });
 };
 app.use(handleError);
 

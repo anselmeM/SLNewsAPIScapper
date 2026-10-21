@@ -149,7 +149,10 @@ describe('error handling', () => {
         .send('{"apiKey":"super-secret-value",');
 
       expect(res.status).toBe(400);
-      expect(res.body).toEqual({ error: 'Bad request' });
+      // 4xx bodies now carry the correlation id alongside the error message.
+      expect(res.body).toEqual(expect.objectContaining({ error: 'Bad request' }));
+      expect(res.body.request_id).toEqual(expect.any(String));
+      expect(res.body.request_id).toBe(res.headers['x-request-id']);
 
       expect(warnSpy).toHaveBeenCalledTimes(1);
       const [context] = warnSpy.mock.calls[0] as [Record<string, unknown>];
