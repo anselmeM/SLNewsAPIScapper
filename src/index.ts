@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { runSierraLeoneIngestion } from './services/scraper.js';
 import logger from './logger.js';
 

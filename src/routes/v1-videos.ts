@@ -151,7 +151,7 @@ router.get('/', async (req: Request, res: Response) => {
       prisma.video.count({ where }),
     ]);
 
-    res.set('Cache-Control', 'public, max-age=300, s-maxage=300');
+    res.set('Cache-Control', 'private, max-age=300');
     res.json({
       data: videos.map((v) => ({
         id: v.id,

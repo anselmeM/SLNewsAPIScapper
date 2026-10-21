@@ -11,6 +11,13 @@ const parser = new Parser({
   headers: { 'User-Agent': USER_AGENT },
 });
 
+// Metadata backfill (image/description/category) now runs inline with each feed
+// item we already parsed. Image backfill can still hit an article page, so it is
+// capped per ingestion run to keep a run bounded even if many rows are missing
+// images forever.
+const MAX_IMAGE_FETCHES_PER_RUN = 10;
+const BACKFILL_BUDGET_MS = 60_000;
+
 interface FeedItem {
   link?: string;
   title?: string;
@@ -94,17 +101,19 @@ function extractDescription(item: FeedItem): string | null {
   return null;
 }
 
-async function findArticleImage(link: string, feedHtml: string): Promise<string | null> {
-  if (feedHtml) {
-    const src = firstImageFromHtml(feedHtml);
-    if (src) {
-      if (src.startsWith('http')) return src;
-      try {
-        return new URL(src, link).href;
-      } catch {}
-    }
+function resolveFeedImage(link: string, feedHtml: string): string | null {
+  if (!feedHtml) return null;
+  const src = firstImageFromHtml(feedHtml);
+  if (!src) return null;
+  if (src.startsWith('http')) return src;
+  try {
+    return new URL(src, link).href;
+  } catch {
+    return null;
   }
+}
 
+async function fetchArticlePageImage(link: string): Promise<string | null> {
   try {
     const { data } = await fetchWithRetry(link, {
       timeout: 8000,
@@ -123,6 +132,12 @@ async function findArticleImage(link: string, feedHtml: string): Promise<string 
   }
 
   return null;
+}
+
+async function findArticleImage(link: string, feedHtml: string): Promise<string | null> {
+  // Prefer the image already present in the feed payload (free); fall back to one
+  // article-page fetch for new articles.
+  return resolveFeedImage(link, feedHtml) ?? fetchArticlePageImage(link);
 }
 
 async function scrapeFullContent(url: string, selector: string): Promise<string[]> {
@@ -146,60 +161,16 @@ async function scrapeFullContent(url: string, selector: string): Promise<string[
   }
 }
 
-async function backfillArticleMeta(): Promise<void> {
-  const counts = await prisma.article.count({
-    where: { OR: [{ imageUrl: null }, { description: null }, { category: { equals: [] } }] },
-  });
-  if (counts === 0) return;
-
-  logger.info({ count: counts }, 'Backfilling articles with missing metadata');
-
-  const allArticles = await prisma.article.findMany({
-    select: { id: true, link: true, imageUrl: true, description: true, category: true },
-  });
-  const linkMap = new Map(allArticles.map((a) => [a.link, a]));
-
-  for (const source of SIERRA_LEONE_SOURCES) {
-    try {
-      const feed = await parser.parseURL(source.feedUrl);
-      for (const item of feed.items) {
-        if (!item.link) continue;
-        const link = extractRealLink(item.link);
-        const existing = linkMap.get(link);
-        if (!existing) continue;
-
-        const updateData: Record<string, unknown> = {};
-
-        if (!existing.imageUrl) {
-          const feedHtml = getFeedContentHtml(item);
-          const img = await findArticleImage(link, feedHtml);
-          if (img) updateData.imageUrl = img;
-        }
-
-        if (!existing.description) {
-          const desc = extractDescription(item);
-          if (desc) updateData.description = desc;
-        }
-
-        if (existing.category.length === 0 && item.categories && item.categories.length > 0) {
-          updateData.category = item.categories;
-        }
-
-        if (Object.keys(updateData).length > 0) {
-          await prisma.article.update({ where: { id: existing.id }, data: updateData });
-          logger.trace({ id: existing.id, title: item.title?.slice(0, 50) }, 'Backfilled article meta');
-        }
-      }
-    } catch {
-      logger.warn({ source: source.name }, 'Failed backfilling from feed');
-    }
-  }
-}
-
 export async function runSierraLeoneIngestion() {
   logger.info('Starting Sierra Leone Ingestion Cycle');
 
-  await backfillArticleMeta();
+  // Budget for article-page image fetches during metadata backfill. Feed HTML
+  // image extraction is free and stays uncapped; only the extra page fetch is
+  // limited, and the counters are shared across all sources in this run.
+  const runStartedAt = Date.now();
+  let imageFetches = 0;
+  const canFetchImage = () =>
+    imageFetches < MAX_IMAGE_FETCHES_PER_RUN && Date.now() - runStartedAt < BACKFILL_BUDGET_MS;
 
   for (const source of SIERRA_LEONE_SOURCES) {
     logger.info({ source: source.name }, 'Checking feed');
@@ -215,42 +186,74 @@ export async function runSierraLeoneIngestion() {
 
           const existing = await prisma.article.findUnique({
             where: { link },
-            select: { id: true },
+            select: { id: true, link: true, imageUrl: true, description: true, category: true },
           });
 
-          if (!existing) {
-            logger.info({ title: item.title }, 'Ingesting article');
-            let paragraphs = await scrapeFullContent(link, source.contentSelector);
+          if (existing) {
+            // Fill only metadata that is still missing, using the feed item we
+            // already fetched. Existing values are never overwritten.
+            const updateData: Record<string, unknown> = {};
 
-            const feedHtml = getFeedContentHtml(item);
-
-            if (paragraphs.length === 0 && feedHtml) {
-              paragraphs = paragraphsFromHtml(feedHtml);
+            if (!existing.imageUrl) {
+              const feedHtml = getFeedContentHtml(item);
+              const feedImage = resolveFeedImage(link, feedHtml);
+              if (feedImage) {
+                updateData.imageUrl = feedImage;
+              } else if (canFetchImage()) {
+                imageFetches++;
+                const pageImage = await fetchArticlePageImage(link);
+                if (pageImage) updateData.imageUrl = pageImage;
+              }
             }
 
-            const imageUrl = await findArticleImage(link, feedHtml);
-            const description = extractDescription(item);
+            if (!existing.description) {
+              const description = extractDescription(item);
+              if (description) updateData.description = description;
+            }
 
-            // Upsert instead of create: if an overlapping scrape run ingested this
-            // link in the meantime, this becomes a no-op instead of a unique-constraint crash.
-            await prisma.article.upsert({
-              where: { link },
-              update: {},
-              create: {
-                title: item.title,
-                link: link,
-                pubDate: safeParseDate(item.pubDate),
-                author: item.creator || source.name,
-                description: description,
-                category: item.categories || [],
-                imageUrl: imageUrl,
-                paragraphs: paragraphs,
-                source: source.name,
-              },
-            });
+            if (existing.category.length === 0 && item.categories && item.categories.length > 0) {
+              updateData.category = item.categories;
+            }
 
-            await sleep(1000);
+            if (Object.keys(updateData).length > 0) {
+              await prisma.article.update({ where: { id: existing.id }, data: updateData });
+              logger.trace({ id: existing.id, title: item.title.slice(0, 50) }, 'Backfilled article meta');
+            }
+
+            continue;
           }
+
+          logger.info({ title: item.title }, 'Ingesting article');
+          let paragraphs = await scrapeFullContent(link, source.contentSelector);
+
+          const feedHtml = getFeedContentHtml(item);
+
+          if (paragraphs.length === 0 && feedHtml) {
+            paragraphs = paragraphsFromHtml(feedHtml);
+          }
+
+          const imageUrl = await findArticleImage(link, feedHtml);
+          const description = extractDescription(item);
+
+          // Upsert instead of create: if an overlapping scrape run ingested this
+          // link in the meantime, this becomes a no-op instead of a unique-constraint crash.
+          await prisma.article.upsert({
+            where: { link },
+            update: {},
+            create: {
+              title: item.title,
+              link: link,
+              pubDate: safeParseDate(item.pubDate),
+              author: item.creator || source.name,
+              description: description,
+              category: item.categories || [],
+              imageUrl: imageUrl,
+              paragraphs: paragraphs,
+              source: source.name,
+            },
+          });
+
+          await sleep(1000);
         } catch (itemError) {
           logger.warn({ title: item.title, error: itemError }, 'Error ingesting article');
         }

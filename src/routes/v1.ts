@@ -222,7 +222,7 @@ router.get('/', async (req: Request, res: Response) => {
       prisma.article.count({ where }),
     ]);
 
-    res.set('Cache-Control', 'public, max-age=300, s-maxage=300');
+    res.set('Cache-Control', 'private, max-age=300');
     res.json({
       data: articles.map((a) => ({
         id: a.id,

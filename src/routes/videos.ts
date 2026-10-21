@@ -117,7 +117,7 @@ router.get('/', async (req: Request, res: Response) => {
     const [videos, total] = await Promise.all([prisma.video.findMany(queryOptions), prisma.video.count({ where })]);
 
     res.set('X-Total-Count', String(total));
-    res.set('Cache-Control', 'public, max-age=300, s-maxage=300');
+    res.set('Cache-Control', 'private, max-age=300');
     res.json(videos);
   } catch (error) {
     logger.error(error, 'Failed to fetch videos');
@@ -189,7 +189,7 @@ router.get('/:id', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Video not found' });
     }
 
-    res.set('Cache-Control', 'public, max-age=3600, s-maxage=3600');
+    res.set('Cache-Control', 'private, max-age=3600');
     res.json(video);
   } catch (error) {
     logger.error(error, 'Failed to fetch video');

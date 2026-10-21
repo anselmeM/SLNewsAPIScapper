@@ -51,7 +51,7 @@ router.get('/', async (_req: Request, res: Response) => {
       videoChannelCounts[group.channelTitle] = group._count.channelTitle;
     }
 
-    res.set('Cache-Control', 'public, max-age=60, s-maxage=60');
+    res.set('Cache-Control', 'private, max-age=60');
     res.json({
       status: 'ok',
       timestamp: new Date().toISOString(),

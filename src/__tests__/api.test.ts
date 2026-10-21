@@ -139,7 +139,7 @@ describe('GET /api/news', () => {
     mockFindMany.mockResolvedValueOnce(mockArticles);
 
     const res = await app.get('/api/news').set('Authorization', 'Bearer test-key-123');
-    expect(res.headers['cache-control']).toContain('public');
+    expect(res.headers['cache-control']).toContain('private');
   });
 
   it('returns 400 for invalid limit', async () => {
@@ -228,7 +228,7 @@ describe('GET /api/news/:id', () => {
 
     const res = await app.get('/api/news/1').set('Authorization', 'Bearer test-key-123');
     expect(res.status).toBe(200);
-    expect(res.headers['cache-control']).toContain('public');
+    expect(res.headers['cache-control']).toContain('private');
   });
 });
 
@@ -380,7 +380,7 @@ describe('Versioned API v1', () => {
     mockFindMany.mockResolvedValueOnce(mockArticles);
 
     const res = await app.get('/v1/news').set('Authorization', 'Bearer test-key-123');
-    expect(res.headers['cache-control']).toContain('public');
+    expect(res.headers['cache-control']).toContain('private');
   });
 
   it('filters articles by search query q in v1 contract', async () => {
