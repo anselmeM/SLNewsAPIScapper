@@ -40,6 +40,43 @@ jobs:
       - run: npm ci
       - run: npm test
 
+  # Real-Postgres integration suite: exercises the committed migrations and the
+  # SQL paths that the mocked unit tests cannot see (pagination/keyset, search,
+  # date/content provenance exclusion, API-key scopes/metering, stats counters).
+  # `npm test` stays DB-free; this job is the only one that needs a database.
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_DB: slnews_test
+          # Trust auth inside the throwaway CI service container: no password is
+          # stored in the repo (and secret scanners stay quiet).
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres@localhost:5432/slnews_test
+      NODE_ENV: test
+      API_KEY: integration-test-key
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx prisma migrate deploy
+      - run: npm run test:integration
+
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 15
