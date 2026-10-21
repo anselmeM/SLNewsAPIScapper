@@ -1,26 +1,49 @@
 services:
   - type: web
     name: sl-news-api
-    env: node
+    runtime: node
     region: oregon
     plan: free
-    buildCommand: npm install && npx tsc
-    startCommand: npx prisma db push --url "$DATABASE_URL" && node dist/server.js
+    autoDeployTrigger: checksPass
+    # Render exposes envVars to builds, and NODE_ENV=production makes `npm ci`
+    # skip devDependencies (tsc/prisma are dev-only), so include them explicitly.
+    buildCommand: npm ci --include=dev && npx prisma migrate deploy && npm run build
+    startCommand: node dist/server.js
     healthCheckPath: /api/health
     envVars:
+      - key: NODE_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: info
+      - key: PORT
+        value: '3000'
+      # Secrets/values set in the Render dashboard, never in git.
       - key: DATABASE_URL
         sync: false
-      - key: PORT
-        value: "3000"
+      - key: API_KEY
+        sync: false
+      - key: CORS_ORIGIN
+        sync: false
+      - key: CLERK_SECRET_KEY
+        sync: false
+      - key: CLERK_AUTHORIZED_PARTIES
+        sync: false
 
   - type: cron
     name: sl-news-scraper
-    env: node
+    runtime: node
     region: oregon
-    plan: free
-    schedule: "0 * * * *"
-    buildCommand: npm install && npx tsc
+    # Render does not offer free cron jobs; `starter` is the smallest paid plan.
+    plan: starter
+    schedule: '0 * * * *'
+    autoDeployTrigger: checksPass
+    # Same devDependencies caveat as the web service above.
+    buildCommand: npm ci --include=dev && npm run build
     startCommand: node dist/scrape.js
     envVars:
+      - key: NODE_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: info
       - key: DATABASE_URL
         sync: false
