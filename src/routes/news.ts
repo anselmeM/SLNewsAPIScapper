@@ -2,8 +2,9 @@ import { Router, Request, Response } from 'express';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../db.js';
 import { SIERRA_LEONE_SOURCES } from '../config/sources.js';
-import { parsePositiveInt, parseSearchQuery } from '../utils/query.js';
+import { parsePositiveInt } from '../utils/query.js';
 import { parsePagination } from '../utils/pagination.js';
+import { buildArticleWhere, parseListFilters } from '../utils/listFilters.js';
 import logger from '../logger.js';
 
 const router = Router();
@@ -66,9 +67,10 @@ router.get('/', async (req: Request, res: Response) => {
   try {
     const { source, limit, page, q } = req.query;
 
-    const { term: searchTerm, error: searchError } = parseSearchQuery(q);
-    if (searchError) {
-      return res.status(400).json({ error: searchError });
+    // /api/news supports only `q`; `category`/`from`/`to` stay ignored here.
+    const filters = parseListFilters({ q });
+    if (filters.error) {
+      return res.status(400).json({ error: filters.error });
     }
 
     // Legacy contract: `limit` above MAX_PAGE_SIZE is still clamped silently
@@ -82,20 +84,9 @@ router.get('/', async (req: Request, res: Response) => {
     const take = pagination.pageSize;
 
     const where: Prisma.ArticleWhereInput = {};
-
-    if (source) {
-      const sourceStr = String(source);
-      if (!VALID_SOURCES.includes(sourceStr)) {
-        return res.status(400).json({ error: `Invalid source. Must be one of: ${VALID_SOURCES.join(', ')}` });
-      }
-      where.source = sourceStr;
-    }
-
-    if (searchTerm && searchTerm.length > 0) {
-      where.OR = [
-        { title: { contains: searchTerm, mode: 'insensitive' } },
-        { description: { contains: searchTerm, mode: 'insensitive' } },
-      ];
+    const built = buildArticleWhere(where, filters, { source, validSources: VALID_SOURCES });
+    if (built.error) {
+      return res.status(400).json({ error: built.error });
     }
 
     const queryOptions: NewsQueryOptions = {

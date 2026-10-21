@@ -2,8 +2,8 @@ import { Router, Request, Response } from 'express';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../db.js';
 import { SIERRA_LEONE_SOURCES } from '../config/sources.js';
-import { parseSearchQuery, parseCategories, parseDateRange } from '../utils/query.js';
 import { parsePagination, parseCursor, encodeCursor } from '../utils/pagination.js';
+import { buildArticleWhere, parseListFilters, toArticleMeta } from '../utils/listFilters.js';
 import logger from '../logger.js';
 
 const router = Router();
@@ -114,6 +114,8 @@ const ARTICLE_META_SELECT = {
  *                         type: string
  *                       summary:
  *                         type: string
+ *                         nullable: true
+ *                         description: Publisher summary; null when the feed provided none
  *                       source:
  *                         type: string
  *                       category:
@@ -160,9 +162,9 @@ router.get('/', async (req: Request, res: Response) => {
   try {
     const { category, source, page, page_size, limit, from, to, q, cursor } = req.query;
 
-    const { term: searchTerm, error: searchError } = parseSearchQuery(q);
-    if (searchError) {
-      return res.status(400).json({ error: searchError });
+    const filters = parseListFilters({ q, category, from, to });
+    if (filters.error) {
+      return res.status(400).json({ error: filters.error });
     }
 
     if (cursor !== undefined && page !== undefined) {
@@ -186,74 +188,18 @@ router.get('/', async (req: Request, res: Response) => {
       return res.status(400).json({ error: cursorError });
     }
 
-    // Date window validation
-    const { fromDate, toDate, error: dateError } = parseDateRange(from, to);
-    if (dateError) {
-      return res.status(400).json({ error: dateError });
-    }
-
-    // category: string[] via repeated params or comma-separated values
-    const categories = parseCategories(category);
-
     // Sellable feeds never surface rows whose published date could not be
     // parsed; the pinned internal app still sees them via /api/news.
-    const where: Prisma.ArticleWhereInput = { pubDateSource: { not: 'missing' } };
-
-    if (source) {
-      const sourceStr = String(source);
-      if (!VALID_SOURCES.includes(sourceStr)) {
-        return res.status(400).json({ error: `Invalid source. Must be one of: ${VALID_SOURCES.join(', ')}` });
-      }
-      where.source = sourceStr;
-    }
-
-    if (categories.length > 0) {
-      where.category = { hasSome: categories };
-    }
-
-    const pubDateFilter: { gte?: Date; lte?: Date } = {};
-    if (fromDate) pubDateFilter.gte = fromDate;
-    if (toDate) pubDateFilter.lte = toDate;
-    if (Object.keys(pubDateFilter).length > 0) {
-      where.pubDate = pubDateFilter;
-    }
-
-    const searchOr: Prisma.ArticleWhereInput[] | undefined =
-      searchTerm && searchTerm.length > 0
-        ? [
-            { title: { contains: searchTerm, mode: 'insensitive' } },
-            { description: { contains: searchTerm, mode: 'insensitive' } },
-          ]
-        : undefined;
-
-    if (parsedCursor) {
-      // Keyset predicate for the (pubDate desc, id desc) order. It is combined
-      // with the search predicate as AND siblings so neither clobbers the other.
-      const keyset: Prisma.ArticleWhereInput = {
-        OR: [{ pubDate: { lt: parsedCursor.date } }, { pubDate: parsedCursor.date, id: { lt: parsedCursor.id } }],
-      };
-      where.AND = searchOr ? [{ OR: searchOr }, keyset] : [keyset];
-    } else if (searchOr) {
-      where.OR = searchOr;
-    }
-
-    const toMetaArticle = (a: {
-      id: number;
-      title: string;
-      description: string | null;
-      source: string;
-      category: string[];
-      link: string;
-      pubDate: Date;
-    }) => ({
-      id: a.id,
-      title: a.title,
-      summary: a.description,
-      source: a.source,
-      category: a.category,
-      url: a.link,
-      published_at: a.pubDate,
+    const where: Prisma.ArticleWhereInput = {};
+    const built = buildArticleWhere(where, filters, {
+      source,
+      validSources: VALID_SOURCES,
+      excludeMissingDate: true,
+      cursor: parsedCursor,
     });
+    if (built.error) {
+      return res.status(400).json({ error: built.error });
+    }
 
     // Cursor mode: no count query. Fetching one extra row tells us has_more and
     // yields the next cursor from the last *returned* row.
@@ -271,7 +217,7 @@ router.get('/', async (req: Request, res: Response) => {
 
       res.set('Cache-Control', 'private, max-age=300');
       return res.json({
-        data: dataRows.map(toMetaArticle),
+        data: dataRows.map(toArticleMeta),
         meta: {
           page: null,
           page_size: parsedPageSize,
@@ -304,7 +250,7 @@ router.get('/', async (req: Request, res: Response) => {
 
     res.set('Cache-Control', 'private, max-age=300');
     res.json({
-      data: articles.map(toMetaArticle),
+      data: articles.map(toArticleMeta),
       meta: {
         page: parsedPage,
         page_size: parsedPageSize,

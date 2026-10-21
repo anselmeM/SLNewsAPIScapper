@@ -1,8 +1,8 @@
 import { Router, Request, Response } from 'express';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../db.js';
-import { parseSearchQuery, parseCategories, parseDateRange } from '../utils/query.js';
 import { parsePagination, parseCursor, encodeCursor } from '../utils/pagination.js';
+import { buildVideoWhere, parseListFilters, toVideoMeta } from '../utils/listFilters.js';
 import logger from '../logger.js';
 
 const router = Router();
@@ -89,6 +89,15 @@ const router = Router();
  *                   items:
  *                     type: object
  *                     required: [id, video_id, title, summary, source, category, url, thumbnail_url, published_at]
+ *                     properties:
+ *                       summary:
+ *                         type: string
+ *                         nullable: true
+ *                         description: Publisher summary; null when the feed provided none
+ *                       thumbnail_url:
+ *                         type: string
+ *                         nullable: true
+ *                         description: Thumbnail URL; null when the source provides none
  *                 meta:
  *                   type: object
  *                   required: [page, page_size, total, has_more, next_cursor]
@@ -118,9 +127,9 @@ router.get('/', async (req: Request, res: Response) => {
   try {
     const { category, channel, page, page_size, limit, from, to, q, cursor } = req.query;
 
-    const { term: searchTerm, error: searchError } = parseSearchQuery(q);
-    if (searchError) {
-      return res.status(400).json({ error: searchError });
+    const filters = parseListFilters({ q, category, from, to });
+    if (filters.error) {
+      return res.status(400).json({ error: filters.error });
     }
 
     if (cursor !== undefined && page !== undefined) {
@@ -143,76 +152,17 @@ router.get('/', async (req: Request, res: Response) => {
       return res.status(400).json({ error: cursorError });
     }
 
-    const { fromDate, toDate, error: dateError } = parseDateRange(from, to);
-    if (dateError) {
-      return res.status(400).json({ error: dateError });
-    }
-
-    const categories = parseCategories(category);
-
     // Sellable feeds never surface rows whose published date could not be
     // parsed; the pinned internal app still sees them via /api/videos.
-    const where: Prisma.VideoWhereInput = { publishedAtSource: { not: 'missing' } };
-
-    if (channel) {
-      where.channelTitle = { contains: String(channel), mode: 'insensitive' };
-    }
-
-    if (categories.length > 0) {
-      where.category = { hasSome: categories };
-    }
-
-    const publishedAtFilter: { gte?: Date; lte?: Date } = {};
-    if (fromDate) publishedAtFilter.gte = fromDate;
-    if (toDate) publishedAtFilter.lte = toDate;
-    if (Object.keys(publishedAtFilter).length > 0) {
-      where.publishedAt = publishedAtFilter;
-    }
-
-    const searchOr: Prisma.VideoWhereInput[] | undefined =
-      searchTerm && searchTerm.length > 0
-        ? [
-            { title: { contains: searchTerm, mode: 'insensitive' } },
-            { description: { contains: searchTerm, mode: 'insensitive' } },
-            { channelTitle: { contains: searchTerm, mode: 'insensitive' } },
-          ]
-        : undefined;
-
-    if (parsedCursor) {
-      // Keyset predicate for the (publishedAt desc, id desc) order, combined
-      // with the search predicate as AND siblings so neither clobbers the other.
-      const keyset: Prisma.VideoWhereInput = {
-        OR: [
-          { publishedAt: { lt: parsedCursor.date } },
-          { publishedAt: parsedCursor.date, id: { lt: parsedCursor.id } },
-        ],
-      };
-      where.AND = searchOr ? [{ OR: searchOr }, keyset] : [keyset];
-    } else if (searchOr) {
-      where.OR = searchOr;
-    }
-
-    const toMetaVideo = (v: {
-      id: number;
-      videoId: string;
-      title: string;
-      description: string | null;
-      channelTitle: string;
-      category: string[];
-      url: string;
-      thumbnailUrl: string | null;
-      publishedAt: Date;
-    }) => ({
-      id: v.id,
-      video_id: v.videoId,
-      title: v.title,
-      summary: v.description,
-      source: v.channelTitle,
-      category: v.category,
-      url: v.url,
-      thumbnail_url: v.thumbnailUrl,
-      published_at: v.publishedAt,
+    const where: Prisma.VideoWhereInput = {};
+    const built = buildVideoWhere(where, filters, {
+      channel,
+      excludeMissingDate: true,
+      cursor: parsedCursor,
     });
+    if (built.error) {
+      return res.status(400).json({ error: built.error });
+    }
 
     // Cursor mode: no count query. One extra row decides has_more/next_cursor.
     if (parsedCursor) {
@@ -228,7 +178,7 @@ router.get('/', async (req: Request, res: Response) => {
 
       res.set('Cache-Control', 'private, max-age=300');
       return res.json({
-        data: dataRows.map(toMetaVideo),
+        data: dataRows.map(toVideoMeta),
         meta: {
           page: null,
           page_size: parsedPageSize,
@@ -257,7 +207,7 @@ router.get('/', async (req: Request, res: Response) => {
 
     res.set('Cache-Control', 'private, max-age=300');
     res.json({
-      data: videos.map(toMetaVideo),
+      data: videos.map(toVideoMeta),
       meta: {
         page: parsedPage,
         page_size: parsedPageSize,

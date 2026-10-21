@@ -2,11 +2,33 @@ import { Router, Request, Response } from 'express';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../db.js';
 import { runSierraLeoneVideoIngestion } from '../services/video-scraper.js';
-import { parsePositiveInt, parseSearchQuery, parseCategories } from '../utils/query.js';
+import { parsePositiveInt } from '../utils/query.js';
 import { parsePagination } from '../utils/pagination.js';
+import { buildVideoWhere, parseListFilters } from '../utils/listFilters.js';
 import logger from '../logger.js';
 
 const router = Router();
+
+const DEFAULT_VIDEO_SYNC_COOLDOWN_MS = 30_000;
+
+// Manual sync overlap guard. Module-level state is intentional: a single API
+// process should never run two ingestion cycles at once (the hourly cron is the
+// normal path), and a cooldown keeps a caller from re-triggering it immediately.
+let videoSyncInFlight = false;
+let videoSyncCooldownUntil = 0;
+
+function videoSyncCooldownMs(): number {
+  const raw = process.env.VIDEO_SYNC_COOLDOWN_MS;
+  if (raw === undefined || raw.trim() === '') return DEFAULT_VIDEO_SYNC_COOLDOWN_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_VIDEO_SYNC_COOLDOWN_MS;
+}
+
+/** Test-only: clears the in-flight flag and cooldown timestamp. */
+export function __resetVideoSyncState(): void {
+  videoSyncInFlight = false;
+  videoSyncCooldownUntil = 0;
+}
 
 interface VideoQueryOptions {
   orderBy: Array<{ publishedAt: 'desc' } | { id: 'desc' }>;
@@ -69,9 +91,9 @@ router.get('/', async (req: Request, res: Response) => {
   try {
     const { channel, category, limit, page, q } = req.query;
 
-    const { term: searchTerm, error: searchError } = parseSearchQuery(q);
-    if (searchError) {
-      return res.status(400).json({ error: searchError });
+    const filters = parseListFilters({ q, category });
+    if (filters.error) {
+      return res.status(400).json({ error: filters.error });
     }
 
     // Same legacy contract as /api/news: clamp `limit`, but reject absurd pages.
@@ -82,24 +104,9 @@ router.get('/', async (req: Request, res: Response) => {
 
     const take = pagination.pageSize;
     const where: Prisma.VideoWhereInput = {};
-
-    if (channel) {
-      where.channelTitle = { contains: String(channel), mode: 'insensitive' };
-    }
-
-    if (searchTerm && searchTerm.length > 0) {
-      where.OR = [
-        { title: { contains: searchTerm, mode: 'insensitive' } },
-        { description: { contains: searchTerm, mode: 'insensitive' } },
-        { channelTitle: { contains: searchTerm, mode: 'insensitive' } },
-      ];
-    }
-
-    if (category) {
-      const categories = parseCategories(category);
-      if (categories.length > 0) {
-        where.category = { hasSome: categories };
-      }
+    const built = buildVideoWhere(where, filters, { channel });
+    if (built.error) {
+      return res.status(400).json({ error: built.error });
     }
 
     const queryOptions: VideoQueryOptions = {
@@ -134,6 +141,20 @@ router.get('/', async (req: Request, res: Response) => {
  *         description: Unauthorized
  */
 router.post('/sync', async (_req: Request, res: Response) => {
+  if (videoSyncInFlight) {
+    res.status(409).json({ error: 'Video sync already in progress' });
+    return;
+  }
+
+  const now = Date.now();
+  if (now < videoSyncCooldownUntil) {
+    const retryAfterSeconds = Math.max(1, Math.ceil((videoSyncCooldownUntil - now) / 1000));
+    res.set('Retry-After', String(retryAfterSeconds));
+    res.status(429).json({ error: 'Video sync is cooling down', retry_after_seconds: retryAfterSeconds });
+    return;
+  }
+
+  videoSyncInFlight = true;
   try {
     const result = await runSierraLeoneVideoIngestion();
     res.json({
@@ -144,6 +165,9 @@ router.post('/sync', async (_req: Request, res: Response) => {
   } catch (error) {
     logger.error(error, 'Manual video sync failed');
     res.status(500).json({ error: 'Video ingestion failed' });
+  } finally {
+    videoSyncInFlight = false;
+    videoSyncCooldownUntil = Date.now() + videoSyncCooldownMs();
   }
 });
 
