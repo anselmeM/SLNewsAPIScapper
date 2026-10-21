@@ -1,3 +1,5 @@
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 import swaggerJsdoc from 'swagger-jsdoc';
 
 /**
@@ -7,6 +9,24 @@ import swaggerJsdoc from 'swagger-jsdoc';
  */
 export const AUTH_DESCRIPTION =
   'Static API key (API_KEY), or a Clerk session JWT when CLERK_SECRET_KEY is configured — either as `Authorization: Bearer <token>`.';
+
+/**
+ * Where swagger-jsdoc should read operation JSDoc from.
+ *
+ * In development and tests the TypeScript sources are present; the production
+ * image ships only the compiled `dist/` output, so the spec would silently be
+ * empty there unless it falls back to the emitted JavaScript (tsc preserves the
+ * JSDoc comments). `existsSync` makes the choice deterministic at startup.
+ *
+ * Glob strings are forward-slashed so the same pattern works on Windows and on
+ * the Linux production image.
+ */
+export function resolveApiGlobs(baseDir: string = process.cwd()): string[] {
+  const toGlob = (dir: string, extension: 'ts' | 'js') => `${dir.split(path.sep).join('/')}/*.${extension}`;
+  const srcRoutes = path.join(baseDir, 'src', 'routes');
+  if (existsSync(srcRoutes)) return [toGlob(srcRoutes, 'ts')];
+  return [toGlob(path.join(baseDir, 'dist', 'routes'), 'js')];
+}
 
 const options: swaggerJsdoc.Options = {
   definition: {
@@ -30,7 +50,7 @@ const options: swaggerJsdoc.Options = {
       },
     },
   },
-  apis: ['src/routes/*.ts'],
+  apis: resolveApiGlobs(),
 };
 
 export const swaggerSpec = swaggerJsdoc(options);

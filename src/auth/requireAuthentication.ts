@@ -12,9 +12,19 @@ const STATIC_KEY_MESSAGE = 'Unauthorized — provide a valid API key via Authori
 const STATIC_KEY_OR_CLERK_MESSAGE =
   'Unauthorized — provide a valid API key or Clerk session token via Authorization: Bearer <token>';
 
+/**
+ * Timing-safe credential comparison.
+ *
+ * Both inputs are hashed to a fixed 32-byte SHA-256 digest before comparing, so
+ * `crypto.timingSafeEqual` never sees buffers of different lengths. That matters
+ * because it throws on a length mismatch: comparing a multibyte token whose
+ * UTF-8 byte length differs from the API key's would otherwise surface as a 500
+ * instead of a 401 (and leak the key's byte length to the caller). Hashing the
+ * inputs keeps the comparison constant-time while removing that asymmetry.
+ */
 function timingSafeEqualStr(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
+  const digest = (value: string) => crypto.createHash('sha256').update(value, 'utf8').digest();
+  return crypto.timingSafeEqual(digest(a), digest(b));
 }
 
 /** Scheme is case-insensitive per RFC 7235: accept "Bearer", "bearer", etc. */

@@ -115,7 +115,9 @@ router.get('/', async (req: Request, res: Response) => {
     ]);
 
     res.set('X-Total-Count', String(total));
-    res.set('Cache-Control', 'public, max-age=300, s-maxage=300');
+    // Authenticated data: shared caches must not serve it. `s-maxage` would only
+    // apply to shared caches, which `private` excludes, so it is intentionally absent.
+    res.set('Cache-Control', 'private, max-age=300');
     res.json(articles);
   } catch (error) {
     logger.error(error, 'Failed to fetch articles');
@@ -159,7 +161,7 @@ router.get('/:id', async (req: Request, res: Response) => {
     });
 
     if (!article) return res.status(404).json({ error: 'Article not found' });
-    res.set('Cache-Control', 'public, max-age=3600, s-maxage=3600');
+    res.set('Cache-Control', 'private, max-age=3600');
     res.json(article);
   } catch (error) {
     logger.error(error, 'Failed to fetch article');
