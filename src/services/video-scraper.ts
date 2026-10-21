@@ -64,7 +64,10 @@ export function parseYouTubeAtomFeed(xml: string, defaultCategory: string[] = []
   return videos;
 }
 
-export async function syncYouTubeChannel(source: VideoSourceConfig): Promise<{
+export async function syncYouTubeChannel(
+  source: VideoSourceConfig,
+  deadlineAt?: number,
+): Promise<{
   ingested: number;
   skipped: number;
   errors: number;
@@ -77,33 +80,37 @@ export async function syncYouTubeChannel(source: VideoSourceConfig): Promise<{
   logger.info({ channel: source.name, feedUrl }, 'Syncing YouTube channel feed');
 
   try {
-    const { data } = await fetchWithRetry(feedUrl, {
-      timeout: 10000,
-      headers: { 'User-Agent': USER_AGENT },
-    });
+    const { data } = await fetchWithRetry(
+      feedUrl,
+      { timeout: 10000, headers: { 'User-Agent': USER_AGENT } },
+      deadlineAt === undefined ? {} : { deadlineMs: deadlineAt },
+    );
 
     const videos = parseYouTubeAtomFeed(String(data), source.category);
     logger.info({ channel: source.name, count: videos.length }, 'Found videos in YouTube feed');
 
+    // One batched lookup for the whole channel instead of a findUnique per video.
+    const existingVideoIds = new Set<string>();
+    if (videos.length > 0) {
+      const existingVideos = await prisma.video.findMany({
+        where: { videoId: { in: videos.map((v) => v.videoId) } },
+        select: { videoId: true },
+      });
+      for (const video of existingVideos) existingVideoIds.add(video.videoId);
+    }
+
     for (const v of videos) {
       try {
-        const existing = await prisma.video.findUnique({
-          where: { videoId: v.videoId },
-          select: { id: true },
-        });
-
-        if (existing) {
+        if (existingVideoIds.has(v.videoId)) {
           skipped++;
           continue;
         }
 
+        // Only new videos reach this upsert, so the update branch stays empty:
+        // if an overlapping run created the row first, this is a no-op.
         await prisma.video.upsert({
           where: { videoId: v.videoId },
-          update: {
-            title: v.title,
-            description: v.description,
-            thumbnailUrl: v.thumbnailUrl,
-          },
+          update: {},
           create: {
             videoId: v.videoId,
             title: v.title,
@@ -117,6 +124,7 @@ export async function syncYouTubeChannel(source: VideoSourceConfig): Promise<{
           },
         });
 
+        existingVideoIds.add(v.videoId);
         ingested++;
       } catch (upsertError) {
         errors++;
@@ -131,7 +139,7 @@ export async function syncYouTubeChannel(source: VideoSourceConfig): Promise<{
   return { ingested, skipped, errors };
 }
 
-export async function runSierraLeoneVideoIngestion(): Promise<{
+export async function runSierraLeoneVideoIngestion(deadlineAt?: number): Promise<{
   totalIngested: number;
   totalSkipped: number;
   totalErrors: number;
@@ -143,7 +151,15 @@ export async function runSierraLeoneVideoIngestion(): Promise<{
   let totalErrors = 0;
 
   for (const source of SIERRA_LEONE_VIDEO_SOURCES) {
-    const { ingested, skipped, errors } = await syncYouTubeChannel(source);
+    if (deadlineAt !== undefined && Date.now() >= deadlineAt) {
+      logger.warn(
+        { channel: source.name, deadlineAt },
+        'Ingestion deadline reached; skipping remaining video channels',
+      );
+      break;
+    }
+
+    const { ingested, skipped, errors } = await syncYouTubeChannel(source, deadlineAt);
     totalIngested += ingested;
     totalSkipped += skipped;
     totalErrors += errors;

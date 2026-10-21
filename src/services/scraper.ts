@@ -1,22 +1,36 @@
 import Parser from 'rss-parser';
 import * as cheerio from 'cheerio';
 import { prisma } from '../db.js';
-import { SIERRA_LEONE_SOURCES, NewsSourceConfig } from '../config/sources.js';
+import { SIERRA_LEONE_SOURCES } from '../config/sources.js';
 import { runSierraLeoneVideoIngestion } from './video-scraper.js';
 import { normalizeArticleUrl } from '../utils/url.js';
 import { fetchWithRetry, USER_AGENT, sleep } from '../utils/http.js';
 import logger from '../logger.js';
 
-const parser = new Parser({
-  headers: { 'User-Agent': USER_AGENT },
-});
+const parser = new Parser();
 
-// Metadata backfill (image/description/category) now runs inline with each feed
+// Metadata backfill (image/description/category) runs inline with each feed
 // item we already parsed. Image backfill can still hit an article page, so it is
 // capped per ingestion run to keep a run bounded even if many rows are missing
 // images forever.
 const MAX_IMAGE_FETCHES_PER_RUN = 10;
 const BACKFILL_BUDGET_MS = 60_000;
+
+const FEED_TIMEOUT_MS = 15_000;
+const ARTICLE_PAGE_TIMEOUT_MS = 10_000;
+const DEFAULT_INGESTION_DEADLINE_MS = 45 * 60 * 1000;
+
+function readPositiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+export interface IngestionOptions {
+  /** Absolute epoch-ms timestamp after which no new source/page/channel starts. */
+  deadlineAt?: number;
+}
 
 interface FeedItem {
   link?: string;
@@ -28,6 +42,21 @@ interface FeedItem {
   description?: string;
   categories?: string[];
   [key: string]: unknown;
+}
+
+interface ExistingArticleMeta {
+  id: number;
+  link: string;
+  imageUrl: string | null;
+  description: string | null;
+  category: string[];
+}
+
+/** A feed item plus its deduplication key and guaranteed title, resolved once per source. */
+interface PendingItem {
+  item: FeedItem;
+  link: string;
+  title: string;
 }
 
 function safeParseDate(dateStr?: string): Date {
@@ -101,18 +130,51 @@ function extractDescription(item: FeedItem): string | null {
   return null;
 }
 
-function resolveFeedImage(link: string, feedHtml: string): string | null {
-  if (!feedHtml) return null;
-  const src = firstImageFromHtml(feedHtml);
-  if (!src) return null;
-  if (src.startsWith('http')) return src;
+function absolutizeUrl(value: string, base: string): string | null {
+  if (!value) return null;
+  if (value.startsWith('http')) return value;
   try {
-    return new URL(src, link).href;
+    return new URL(value, base).href;
   } catch {
     return null;
   }
 }
 
+function resolveFeedImage(link: string, feedHtml: string): string | null {
+  if (!feedHtml) return null;
+  const src = firstImageFromHtml(feedHtml);
+  return src ? absolutizeUrl(src, link) : null;
+}
+
+/**
+ * Fetches an article page once for ingest. Returns both the selector paragraphs
+ * and the og:image so a new article costs a single request instead of two.
+ */
+async function fetchArticlePage(
+  url: string,
+  selector: string,
+): Promise<{ paragraphs: string[]; imageUrl: string | null }> {
+  try {
+    const { data } = await fetchWithRetry(url, {
+      timeout: ARTICLE_PAGE_TIMEOUT_MS,
+      headers: { 'User-Agent': USER_AGENT },
+    });
+    const $ = cheerio.load(data);
+    const paragraphs: string[] = [];
+    $(selector).each((_, el) => {
+      const text = $(el).text().trim();
+      if (text) paragraphs.push(text);
+    });
+
+    const ogImage = $('meta[property="og:image"]').attr('content');
+    return { paragraphs, imageUrl: ogImage ? absolutizeUrl(ogImage, url) : null };
+  } catch (err) {
+    logger.warn({ url, err }, 'Failed to parse article page');
+    return { paragraphs: [], imageUrl: null };
+  }
+}
+
+/** Page fetch used only for image backfill of already-stored articles. */
 async function fetchArticlePageImage(link: string): Promise<string | null> {
   try {
     const { data } = await fetchWithRetry(link, {
@@ -121,12 +183,7 @@ async function fetchArticlePageImage(link: string): Promise<string | null> {
     });
     const $ = cheerio.load(data);
     const ogImage = $('meta[property="og:image"]').attr('content');
-    if (ogImage) {
-      if (ogImage.startsWith('http')) return ogImage;
-      try {
-        return new URL(ogImage, link).href;
-      } catch {}
-    }
+    return ogImage ? absolutizeUrl(ogImage, link) : null;
   } catch {
     logger.warn({ link }, 'Failed to fetch article page for image');
   }
@@ -134,35 +191,14 @@ async function fetchArticlePageImage(link: string): Promise<string | null> {
   return null;
 }
 
-async function findArticleImage(link: string, feedHtml: string): Promise<string | null> {
-  // Prefer the image already present in the feed payload (free); fall back to one
-  // article-page fetch for new articles.
-  return resolveFeedImage(link, feedHtml) ?? fetchArticlePageImage(link);
-}
-
-async function scrapeFullContent(url: string, selector: string): Promise<string[]> {
-  try {
-    const { data } = await fetchWithRetry(url, {
-      timeout: 10000,
-      headers: { 'User-Agent': USER_AGENT },
-    });
-    const $ = cheerio.load(data);
-    const paragraphs: string[] = [];
-
-    $(selector).each((_, el) => {
-      const text = $(el).text().trim();
-      if (text) paragraphs.push(text);
-    });
-
-    return paragraphs;
-  } catch (err) {
-    logger.warn({ url, err }, 'Failed to parse content');
-    return [];
-  }
-}
-
-export async function runSierraLeoneIngestion() {
+export async function runSierraLeoneIngestion(options: IngestionOptions = {}) {
   logger.info('Starting Sierra Leone Ingestion Cycle');
+
+  // Per-run wall-clock budget for the whole cycle. Read at run start so an env
+  // change applies without a restart, and injectable for tests via options.
+  const configuredDeadlineMs = readPositiveIntEnv('INGESTION_DEADLINE_MS', DEFAULT_INGESTION_DEADLINE_MS);
+  const deadlineAt = options.deadlineAt ?? Date.now() + configuredDeadlineMs;
+  const deadlineReached = () => Date.now() >= deadlineAt;
 
   // Budget for article-page image fetches during metadata backfill. Feed HTML
   // image extraction is free and stays uncapped; only the extra page fetch is
@@ -173,21 +209,40 @@ export async function runSierraLeoneIngestion() {
     imageFetches < MAX_IMAGE_FETCHES_PER_RUN && Date.now() - runStartedAt < BACKFILL_BUDGET_MS;
 
   for (const source of SIERRA_LEONE_SOURCES) {
+    if (deadlineReached()) {
+      logger.warn({ source: source.name, deadlineAt }, 'Ingestion deadline reached; skipping remaining article feeds');
+      break;
+    }
+
     logger.info({ source: source.name }, 'Checking feed');
 
     try {
-      const feed = await parser.parseURL(source.feedUrl);
+      const feedResponse = await fetchWithRetry(source.feedUrl, {
+        timeout: FEED_TIMEOUT_MS,
+        headers: { 'User-Agent': USER_AGENT },
+      });
+      const feed = await parser.parseString(String(feedResponse.data));
 
-      for (const item of feed.items) {
-        if (!item.link || !item.title) continue;
+      // Normalize the whole feed first so dedupe is one batched query per source
+      // instead of one findUnique per item.
+      const pendingItems: PendingItem[] = [];
+      for (const feedItem of feed.items as FeedItem[]) {
+        if (!feedItem.link || !feedItem.title) continue;
+        pendingItems.push({ item: feedItem, link: extractRealLink(feedItem.link), title: feedItem.title });
+      }
 
+      const existingByLink = new Map<string, ExistingArticleMeta>();
+      if (pendingItems.length > 0) {
+        const existingArticles = await prisma.article.findMany({
+          where: { link: { in: pendingItems.map((pending) => pending.link) } },
+          select: { id: true, link: true, imageUrl: true, description: true, category: true },
+        });
+        for (const article of existingArticles) existingByLink.set(article.link, article);
+      }
+
+      for (const { item, link, title } of pendingItems) {
         try {
-          const link = extractRealLink(item.link);
-
-          const existing = await prisma.article.findUnique({
-            where: { link },
-            select: { id: true, link: true, imageUrl: true, description: true, category: true },
-          });
+          const existing = existingByLink.get(link);
 
           if (existing) {
             // Fill only metadata that is still missing, using the feed item we
@@ -217,22 +272,20 @@ export async function runSierraLeoneIngestion() {
 
             if (Object.keys(updateData).length > 0) {
               await prisma.article.update({ where: { id: existing.id }, data: updateData });
-              logger.trace({ id: existing.id, title: item.title.slice(0, 50) }, 'Backfilled article meta');
+              logger.trace({ id: existing.id, title: title.slice(0, 50) }, 'Backfilled article meta');
             }
 
             continue;
           }
 
-          logger.info({ title: item.title }, 'Ingesting article');
-          let paragraphs = await scrapeFullContent(link, source.contentSelector);
+          logger.info({ title }, 'Ingesting article');
 
+          // One request for both paragraphs and og:image.
+          const page = await fetchArticlePage(link, source.contentSelector);
           const feedHtml = getFeedContentHtml(item);
-
-          if (paragraphs.length === 0 && feedHtml) {
-            paragraphs = paragraphsFromHtml(feedHtml);
-          }
-
-          const imageUrl = await findArticleImage(link, feedHtml);
+          const paragraphs = page.paragraphs.length > 0 ? page.paragraphs : paragraphsFromHtml(feedHtml);
+          // Prefer the feed image (free); fall back to the page og:image.
+          const imageUrl = resolveFeedImage(link, feedHtml) ?? page.imageUrl;
           const description = extractDescription(item);
 
           // Upsert instead of create: if an overlapping scrape run ingested this
@@ -241,7 +294,7 @@ export async function runSierraLeoneIngestion() {
             where: { link },
             update: {},
             create: {
-              title: item.title,
+              title: title,
               link: link,
               pubDate: safeParseDate(item.pubDate),
               author: item.creator || source.name,
@@ -255,7 +308,7 @@ export async function runSierraLeoneIngestion() {
 
           await sleep(1000);
         } catch (itemError) {
-          logger.warn({ title: item.title, error: itemError }, 'Error ingesting article');
+          logger.warn({ title, error: itemError }, 'Error ingesting article');
         }
       }
     } catch (feedError) {
@@ -266,10 +319,10 @@ export async function runSierraLeoneIngestion() {
   logger.info('Article Ingestion Cycle Complete');
 
   // Sitemap fallback: catch articles the RSS feed may have missed
-  await scrapeTelegraphFromSitemap();
+  await scrapeTelegraphFromSitemap(deadlineAt);
 
   // Video feeds: ingest latest video broadcasts & shorts
-  await runSierraLeoneVideoIngestion();
+  await runSierraLeoneVideoIngestion(deadlineAt);
 
   logger.info('Full Ingestion Cycle Complete');
 }
@@ -286,6 +339,8 @@ export { runSierraLeoneVideoIngestion };
 const TELEGRAPH_SITEMAP_BASE = 'https://www.thesierraleonetelegraph.com/wp-sitemap-posts-post-';
 const SITEMAP_MAX_PAGES = 20; // Hard safety cap on pagination
 const SITEMAP_MAX_INGEST_PER_RUN = 50; // Politeness cap per run
+const SITEMAP_KNOWN_PAGES_BEFORE_STOP = 2; // Converged once this many pages are fully known
+const SITEMAP_END_STATUSES = new Set([404, 410]);
 
 export function parseSitemapUrls(xml: string): string[] {
   const $ = cheerio.load(xml, { xmlMode: true });
@@ -297,10 +352,20 @@ export function parseSitemapUrls(xml: string): string[] {
   return urls;
 }
 
-async function scrapeTelegraphFromSitemap(): Promise<void> {
+function httpStatusOf(err: unknown): number | undefined {
+  return (err as { response?: { status?: number } }).response?.status;
+}
+
+async function scrapeTelegraphFromSitemap(deadlineAt: number): Promise<void> {
+  const deadlineReached = () => Date.now() >= deadlineAt;
   let ingested = 0;
 
   try {
+    if (deadlineReached()) {
+      logger.warn({ deadlineAt }, 'Ingestion deadline reached; skipping sitemap walk');
+      return;
+    }
+
     // Load every link we already have for this source in one query so dedup is O(1)
     // instead of a findUnique per sitemap URL.
     const existingLinks = new Set(
@@ -312,19 +377,34 @@ async function scrapeTelegraphFromSitemap(): Promise<void> {
       ).map((a) => a.link),
     );
 
+    let consecutiveKnownPages = 0;
+
     for (let page = 1; page <= SITEMAP_MAX_PAGES; page++) {
+      if (deadlineReached()) {
+        logger.warn({ page, deadlineAt }, 'Ingestion deadline reached; skipping remaining sitemap pages');
+        break;
+      }
+
       const sitemapUrl = `${TELEGRAPH_SITEMAP_BASE}${page}.xml`;
 
       let urls: string[];
       try {
-        const resp = await fetchWithRetry(sitemapUrl, {
-          timeout: 15000,
-          headers: { 'User-Agent': USER_AGENT },
-        });
+        const resp = await fetchWithRetry(
+          sitemapUrl,
+          { timeout: 15000, headers: { 'User-Agent': USER_AGENT } },
+          { deadlineMs: deadlineAt },
+        );
         urls = parseSitemapUrls(resp.data);
       } catch (err) {
-        // 404 or network error on a numbered page means the sitemap ends here
-        logger.warn({ page, err }, 'Sitemap page fetch failed; assuming end of sitemap');
+        const status = httpStatusOf(err);
+        if (status !== undefined && SITEMAP_END_STATUSES.has(status)) {
+          // A 404/410 on a numbered page is the normal end of the sitemap.
+          logger.info({ page, status }, 'Sitemap end reached (404/410)');
+        } else {
+          // Any other failure (5xx, network) is not evidence of the end; stop
+          // this run and retry the walk next cycle.
+          logger.error({ page, err }, 'Sitemap page fetch failed; stopping sitemap walk');
+        }
         break;
       }
 
@@ -333,22 +413,41 @@ async function scrapeTelegraphFromSitemap(): Promise<void> {
         break;
       }
 
-      logger.info({ page, totalUrls: urls.length }, 'Sitemap page found URLs');
+      const pageUrls = urls.map(normalizeArticleUrl);
+      const unknownUrls = pageUrls.filter((url) => !existingLinks.has(url));
 
-      for (const rawUrl of urls) {
+      if (unknownUrls.length === 0) {
+        consecutiveKnownPages++;
+        logger.info({ page, consecutiveKnownPages }, 'Sitemap page fully known');
+        if (consecutiveKnownPages >= SITEMAP_KNOWN_PAGES_BEFORE_STOP) {
+          logger.info({ page }, 'Sitemap converged (consecutive fully-known pages); stopping walk');
+          break;
+        }
+        continue;
+      }
+      consecutiveKnownPages = 0;
+
+      logger.info({ page, totalUrls: urls.length, newUrls: unknownUrls.length }, 'Sitemap page found URLs');
+
+      for (const url of unknownUrls) {
+        if (existingLinks.has(url)) continue;
+
         if (ingested >= SITEMAP_MAX_INGEST_PER_RUN) {
           logger.info({ ingested }, 'Sitemap ingest cap reached; remaining articles will be picked up on later runs');
           return;
         }
 
-        const url = normalizeArticleUrl(rawUrl);
-        if (existingLinks.has(url)) continue;
+        if (deadlineReached()) {
+          logger.warn({ ingested, deadlineAt }, 'Ingestion deadline reached; skipping remaining sitemap items');
+          return;
+        }
 
         try {
-          const pageResp = await fetchWithRetry(url, {
-            timeout: 10000,
-            headers: { 'User-Agent': USER_AGENT },
-          });
+          const pageResp = await fetchWithRetry(
+            url,
+            { timeout: 10000, headers: { 'User-Agent': USER_AGENT } },
+            { deadlineMs: deadlineAt },
+          );
           const page$ = cheerio.load(pageResp.data);
           const title =
             page$('meta[property="og:title"]').attr('content') || page$('title').text().trim() || 'Untitled';

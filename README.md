@@ -119,6 +119,19 @@ Keyword search (`q`) is still a case-insensitive `ILIKE '%term%'` over title/des
 
 The migration runs as part of the normal deploy (`prisma migrate deploy`), needs the migration role to be able to `CREATE EXTENSION pg_trgm` (Neon and Render PostgreSQL support it), and builds indexes **non-concurrently**, which takes a brief write lock — run it in a quiet window on a large existing table. Existing databases still need the one-time `npm run db:baseline` before the first `db:migrate:deploy` (see [Deploy to Render](#deploy-to-render)).
 
+## Ingestion pipeline
+
+`npm run scrape` (used by the hourly Render cron) and `npm run dev:all` (ingest, then serve) run one ingestion cycle: RSS/Atom article feeds → Telegraph sitemap backfill → YouTube channel feeds.
+
+- **Shared HTTP retry path.** Feeds, article pages, sitemap pages, and YouTube feeds all go through the same client (`fetchWithRetry`, with feeds parsed from the fetched body via `rss-parser`'s `parseString` — 15 s feed timeout). Transient network errors, `5xx`, and `429` are retried up to 3 attempts with exponential backoff (1 s, 2 s, 4 s, capped at 30 s) plus bounded jitter. `429`/`503` honour `Retry-After` (delta-seconds or HTTP-date, capped at 30 s); other `4xx` are not retried (a `404` on a numbered sitemap page means "end of sitemap"). Each request can also carry an absolute deadline so retries never extend a run past its budget.
+- **Graceful run deadline.** `INGESTION_DEADLINE_MS` (default 45 minutes) is a wall-clock budget for the whole cycle. Once it is reached, no new article source, sitemap page/item, or video channel is started; in-flight work is allowed to finish and the run exits cleanly. Pending work resumes on the next hourly run — it is a graceful stop, not a hard cancellation.
+- **Batched dedupe.** Each feed does one `article.findMany` link lookup and each video channel one `video.findMany` videoId lookup, instead of one query per item; the sitemap walk keeps one in-memory set of known links.
+- **One page fetch per new article.** Paragraphs and `og:image` are extracted from the same article-page request; an image already present in the feed HTML is preferred and skips the page fetch entirely. Existing articles only get the cheap inline metadata backfill (image page fetches remain capped at 10 per run within 60 s).
+- **Sitemap convergence.** The walk keeps its 20-page and 50-ingest-per-run caps and now stops after 2 consecutive fully-known pages. `404`/`410` is treated as the normal end of the sitemap; any other failure logs an error and stops the walk (it no longer pretends the sitemap ended).
+- **User agent.** Defaults to the existing browser-like Chrome UA; set `SCRAPER_USER_AGENT` to a descriptive bot identifier without changing scraping behaviour.
+
+**Known limitations:** there is no persisted sitemap cursor or `<lastmod>` high-water mark, so each run still re-reads the newest sitemap pages; URL canonicalization is unchanged (scheme/`www`/AMP variants can still create duplicate rows); category taxonomy normalization and the empty `category` on sitemap-ingested archive rows are untouched; existing video rows are still skipped rather than refreshed.
+
 ## Scripts
 
 | Command                     | Purpose                                                          |
@@ -138,20 +151,22 @@ The migration runs as part of the normal deploy (`prisma migrate deploy`), needs
 
 ## Environment variables
 
-| Variable                   | Required          | Default                 | Purpose                                                                    |
-| -------------------------- | ----------------- | ----------------------- | -------------------------------------------------------------------------- |
-| `DATABASE_URL`             | Yes               | —                       | PostgreSQL connection string (Neon in production)                          |
-| `API_KEY`                  | Yes in production | —                       | Static bearer key. Without it (and without Clerk) data routes return `500` |
-| `PORT`                     | No                | `3000`                  | HTTP port                                                                  |
-| `NODE_ENV`                 | No                | `development`           | `production` enables JSON logs and production behavior                     |
-| `LOG_LEVEL`                | No                | `info` (prod) / `debug` | Pino log level                                                             |
-| `CORS_ORIGIN`              | No                | `*`                     | Allowed browser origin(s); pin it in production                            |
-| `CLERK_SECRET_KEY`         | No                | —                       | Enables Clerk session-JWT auth alongside `API_KEY`                         |
-| `CLERK_AUTHORIZED_PARTIES` | No                | —                       | Comma-separated `azp` allowlist for Clerk JWTs                             |
-| `TRUST_PROXY_HOPS`         | No                | `1`                     | Reverse-proxy hops trusted for `X-Forwarded-For`                           |
-| `RATE_LIMIT_MAX`           | No                | `100`                   | Max requests per window per caller                                         |
-| `RATE_LIMIT_WINDOW_MS`     | No                | `900000` (15 min)       | Rate-limit window in milliseconds                                          |
-| `FRESHNESS_MAX_AGE_MS`     | No                | `7200000` (2 h)         | Ingestion lag above which `/api/stats` marks a feed `stale`                |
+| Variable                   | Required          | Default                 | Purpose                                                                     |
+| -------------------------- | ----------------- | ----------------------- | --------------------------------------------------------------------------- |
+| `DATABASE_URL`             | Yes               | —                       | PostgreSQL connection string (Neon in production)                           |
+| `API_KEY`                  | Yes in production | —                       | Static bearer key. Without it (and without Clerk) data routes return `500`  |
+| `PORT`                     | No                | `3000`                  | HTTP port                                                                   |
+| `NODE_ENV`                 | No                | `development`           | `production` enables JSON logs and production behavior                      |
+| `LOG_LEVEL`                | No                | `info` (prod) / `debug` | Pino log level                                                              |
+| `CORS_ORIGIN`              | No                | `*`                     | Allowed browser origin(s); pin it in production                             |
+| `CLERK_SECRET_KEY`         | No                | —                       | Enables Clerk session-JWT auth alongside `API_KEY`                          |
+| `CLERK_AUTHORIZED_PARTIES` | No                | —                       | Comma-separated `azp` allowlist for Clerk JWTs                              |
+| `TRUST_PROXY_HOPS`         | No                | `1`                     | Reverse-proxy hops trusted for `X-Forwarded-For`                            |
+| `RATE_LIMIT_MAX`           | No                | `100`                   | Max requests per window per caller                                          |
+| `RATE_LIMIT_WINDOW_MS`     | No                | `900000` (15 min)       | Rate-limit window in milliseconds                                           |
+| `FRESHNESS_MAX_AGE_MS`     | No                | `7200000` (2 h)         | Ingestion lag above which `/api/stats` marks a feed `stale`                 |
+| `INGESTION_DEADLINE_MS`    | No                | `2700000` (45 min)      | Wall-clock budget per ingestion cycle; stops starting new work when reached |
+| `SCRAPER_USER_AGENT`       | No                | browser-like Chrome UA  | User-Agent override for all scraper HTTP requests                           |
 
 ## Deploy to Render
 
@@ -160,12 +175,12 @@ The migration runs as part of the normal deploy (`prisma migrate deploy`), needs
 `render.yaml` is the source of truth. It provisions two services:
 
 - **`sl-news-api`** (web): builds with `npm ci --include=dev && npx prisma migrate deploy && npm run build`, starts with `node dist/server.js`, health-checks `/api/health` (liveness), and deploys only after GitHub checks pass (`autoDeployTrigger: checksPass`).
-- **`sl-news-scraper`** (cron): hourly (`0 * * * *`), runs `node dist/scrape.js`.
+- **`sl-news-scraper`** (cron): hourly (`0 * * * *`), runs `node dist/scrape.js`; each run is bounded by `INGESTION_DEADLINE_MS` (default 45 min) and resumes pending work next cycle.
 
 Setup:
 
 1. Click the button above, or on Render choose **New → Blueprint** and connect this repo.
-2. Provide `DATABASE_URL` and `API_KEY` when prompted (plus optional `CORS_ORIGIN`, `CLERK_SECRET_KEY`, `CLERK_AUTHORIZED_PARTIES`, `FRESHNESS_MAX_AGE_MS`). **`API_KEY` is required**: without it every data route returns `500`, while the liveness probe `/api/health` still reports green (it does not check the database or auth).
+2. Provide `DATABASE_URL` and `API_KEY` when prompted (plus optional `CORS_ORIGIN`, `CLERK_SECRET_KEY`, `CLERK_AUTHORIZED_PARTIES`, `FRESHNESS_MAX_AGE_MS`, `INGESTION_DEADLINE_MS`, `SCRAPER_USER_AGENT`). **`API_KEY` is required**: without it every data route returns `500`, while the liveness probe `/api/health` still reports green (it does not check the database or auth).
 3. **The cron service needs a paid plan.** Render does not offer free cron jobs; the blueprint uses `plan: starter` (smallest paid plan). The web service can stay on the free plan, which spins down after inactivity.
 4. Deploy. The web build applies committed migrations with `prisma migrate deploy` before compiling.
 
