@@ -19,12 +19,22 @@ The feature-branch + PR workflow is therefore mandatory, not optional. Do not pu
 
 ```bash
 npm install              # runs prisma generate + husky (hooks)
-npm test                 # vitest run (one-shot)
+npm test                 # vitest run (unit suite — database-free)
 npm run typecheck        # tsc --noEmit
 npm run lint             # prettier --check on src/
 ```
 
 Requires Node.js **>= 22.12** (`.nvmrc` pins Node 22). For a local database, copy `.env.example` to `.env` and apply the committed migration with `npm run db:migrate:deploy` (or `npm run db:push` for a throwaway DB).
+
+`npm test` is deliberately database-free (every Prisma call is mocked). The separate real-Postgres integration suite (`npm run test:integration`) validates migrations and real SQL paths and runs in CI's `integration` job; to run it locally, point `DATABASE_URL` at a **disposable** database (it truncates tables), apply migrations, then run the suite:
+
+```bash
+export DATABASE_URL="postgresql://postgres@localhost:5432/slnews_test"
+npx prisma migrate deploy
+npm run test:integration
+```
+
+Without `DATABASE_URL` the integration suite skips cleanly (exit 0), so unit runs never require a database.
 
 Hooks are active after install: pre-commit (formats staged files), commit-msg (enforces Conventional Commits), pre-push (blocks direct pushes to `master` + runs the test suite).
 
@@ -46,7 +56,7 @@ Hooks are active after install: pre-commit (formats staged files), commit-msg (e
 
 - [ ] Conventional Commits, atomic changes
 - [ ] Local checks pass (`npm test`, `npm run typecheck`, `npm run lint`)
-- [ ] CI green: `lint-and-typecheck`, `test`, `build`, `docker` (PRs), `audit`
+- [ ] CI green: `lint-and-typecheck`, `test`, `integration`, `build`, `docker` (PRs), `audit`
 - [ ] No secrets/PII or debug leftovers
 - [ ] Tests added/updated for changed behavior
 - [ ] Docs updated if workflow/API/env changed

@@ -216,6 +216,26 @@ Every stored date and body records **why** it has the value it does, so bad publ
 | `npm run keys:create`       | Create a customer API key (`-- --name "<customer>" --scopes v1:read [--expires-at ISO]`) |
 | `npm run keys:list`         | List customer keys, scopes, status and today's request count                             |
 | `npm run keys:revoke`       | Revoke a customer key (`-- --id <n>`)                                                    |
+| `npm run test:integration`  | Real-Postgres integration suite (needs a disposable `DATABASE_URL`)                      |
+
+## Testing
+
+Two suites, split by whether they need a database:
+
+- **Unit suite — `npm test`** (`vitest run`). Database-free and fast: every Prisma call is mocked. This is what the pre-push hook and the CI `test` job run, and it stays that way — `vitest.config.mts` explicitly excludes `src/__tests__/integration/`.
+- **Real-Postgres integration suite — `npm run test:integration`** (`vitest run --config vitest.integration.config.mts`). Runs against a live PostgreSQL database to exercise what mocked tests cannot: the committed migrations (`prisma migrate deploy`), pagination/keyset over duplicate dates, `q`/category/`from`–`to` filters as real SQL, missing-date provenance exclusion on `/v1/*` vs inclusion on legacy `/api/*`, customer API-key scopes + usage metering, `/api/stats` provenance counters, and `Article.link` uniqueness.
+
+  CI runs this automatically in the `integration` job against a `postgres:16` service container. To run it locally, use a **disposable** database (the suite truncates `Article`, `Video`, `ApiKey` and `ApiKeyUsage` before every test — never point it at production):
+
+  ```bash
+  # any empty/disposable database works; the example matches the CI service
+  # (CI uses passwordless trust auth inside its throwaway service container)
+  export DATABASE_URL="postgresql://postgres@localhost:5432/slnews_test"
+  npx prisma migrate deploy
+  npm run test:integration
+  ```
+
+  Without `DATABASE_URL` the suite skips cleanly (`9 skipped`, exit 0), so local unit runs never require a database. The integration suite is a representative slice of the HTTP/SQL surface, not a replacement for the unit suite.
 
 ## Environment variables
 
@@ -294,7 +314,8 @@ The image runs as a non-root user with `NODE_ENV=production`, and `/docs` resolv
 `.github/workflows/ci.yml` runs on pushes to `master`/`main` and on pull requests:
 
 - `lint-and-typecheck` — Prisma validate, Prettier, `tsc --noEmit`
-- `test` — Vitest suite
+- `test` — Vitest unit suite (database-free; the integration suite is excluded)
+- `integration` — real-Postgres integration suite against a `postgres:16` service container (applies migrations, then runs `npm run test:integration`)
 - `build` — `npm run build` (no database needed)
 - `docker` — image build on pull requests only
 - `audit` — `npm audit --omit=dev --audit-level=high`
