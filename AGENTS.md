@@ -16,8 +16,10 @@ non-negotiable; when in doubt, ask.
    chars, body explains WHY not what. Types: `feat:` `fix:` `refactor:` `perf:`
    `test:` `docs:` `ci:` `chore:` `security:` `revert:` (enforced by commitlint).
 3. **The gates are local hooks + CI + PR discipline**: `lint-and-typecheck`,
-   `test`, `build`, `docker` (PRs), `audit` must be green before merge. Run checks
-   locally first: `npm test`, `npm run typecheck`, `npm run lint`.
+   `test` (coverage thresholds), `integration`, `build`, `docker` (PRs), `audit`
+   must be green before merge. Run checks locally first: `npm run lint`,
+   `npm run typecheck`, `npm run test:coverage` (`npm test` is the fast DB-free
+   equivalent).
 4. **Never rewrite pushed/shared history.** Rebase/squash only on your own
    unpushed branch; if a force-push is unavoidable use `--force-with-lease`.
 5. **No secrets in code.** `DATABASE_URL`, `API_KEY` live in environment settings.
@@ -32,7 +34,7 @@ non-negotiable; when in doubt, ask.
 git switch master && git pull
 git switch -c <type>/<desc>        # feat/ fix/ chore/ docs/ refactor/...
 # ...atomic conventional commits...
-npm test && npm run typecheck && npm run lint
+npm run lint && npm run typecheck && npm run test:coverage
 git push -u origin <type>/<desc>
 gh pr create --base master --head <type>/<desc>
 # wait for CI, then: gh pr merge --squash --delete-branch
@@ -51,7 +53,8 @@ Standard push flow: `bash "C:\Users\amotc\.agents\skills\git-pushing\scripts\sma
   handler, pino-http logging with credential redaction, graceful shutdown
   (`createShutdownHandler`: drains idle connections, unref'd force-exit timer,
   duplicate signals ignored) and fatal `unhandledRejection`/`uncaughtException`
-  handlers. Production logs are JSON; `pino-pretty` is dev-only.
+  handlers. Boot-time env validation (`assertRuntimeEnv`) runs before `listen()`.
+  Production logs are JSON; `pino-pretty` is dev-only.
 - `src/auth/` — `requireAuthentication.ts` (static `API_KEY`, optional Clerk
   session JWT, and `slk_`-prefixed DB customer keys; fails closed with 500 when
   neither static key nor Clerk is configured), `authorize.ts` (scope guard:
@@ -87,7 +90,11 @@ Standard push flow: `bash "C:\Users\amotc\.agents\skills\git-pushing\scripts\sma
   list routes), `dates.ts` (`parsePublishedDate` → `{ date, source, raw }`, never
   throws), `url.ts` (link normalization).
 - `src/config/` — sources, video sources, Swagger (`swagger.ts` falls back to
-  `dist/routes/*.js` so `/docs` works in the Docker image).
+  `dist/routes/*.js` so `/docs` works in the Docker image), and `env.ts`
+  (fail-fast boot validation: missing `DATABASE_URL`, invalid `NODE_ENV`/`PORT`,
+  and production without `API_KEY`/Clerk are errors; malformed numeric tunables
+  and an unset production `CORS_ORIGIN` warn; the scrape worker and
+  `--scrape-only` validate without requiring API credentials).
 - `prisma/schema.prisma` — `Article`/`Video`/`ApiKey`/`ApiKeyUsage` models on
   Prisma 7 with `@prisma/adapter-pg`. Migration
   `20261021130000_date_content_provenance` adds date/content provenance
@@ -100,12 +107,17 @@ Standard push flow: `bash "C:\Users\amotc\.agents\skills\git-pushing\scripts\sma
 - `.husky/` — pre-commit (lint-staged), commit-msg (commitlint), pre-push
   (blocks master + runs tests). `docs/GIT-WORKFLOW.md` — full workflow doc.
 - `docs/CODEBASE-AUDIT.md` — audit findings and implementation status.
-- `.github/workflows/ci.yml` — CI (`lint-and-typecheck`, `test`, `integration` with
-  a `postgres:16` service, `build`, `docker-on-PR`, `audit`);
-  `.github/PULL_REQUEST_TEMPLATE.md`. `Dockerfile` + `.dockerignore` — optional
-  container path. `LICENSE` (MIT), `.gitattributes` (`* text=auto`, binary
-  patterns, `*.patch -text`), `.nvmrc` — Node 22; `engines` requires >= 22.12.
-  `pino-pretty` is a devDependency (production logging is JSON).
+- `.github/workflows/ci.yml` — CI (`lint-and-typecheck` = oxlint + Prettier +
+  typecheck, `test` with enforced coverage thresholds, `integration` with a
+  `postgres:16` service, `build`, `docker-on-PR`, `audit`);
+  `.github/PULL_REQUEST_TEMPLATE.md`. All third-party actions are pinned to full
+  commit SHAs, and `.github/dependabot.yml` updates them weekly (`github-actions`,
+  limit 5, `chore(ci)`). Lint is **oxlint + Prettier** — ESLint/typescript-eslint
+  8.x cannot run under TypeScript 7 (no JS compiler API;
+  typescript-eslint#10940 tracks support). `Dockerfile` + `.dockerignore` —
+  optional container path. `LICENSE` (MIT), `.gitattributes` (`* text=auto`,
+  binary patterns, `*.patch -text`), and `.nvmrc` (Node 22 — `engines` requires
+  Node `>= 22.12.0`). `pino-pretty` is a devDependency (production logging is JSON).
 
 ## Business rules (do not violate)
 
@@ -128,7 +140,12 @@ Standard push flow: `bash "C:\Users\amotc\.agents\skills\git-pushing\scripts\sma
   incompatible with TypeScript 7 (no JS compiler API). Do not reintroduce it.
 - Docker is unavailable on this machine; use npm scripts + Vercel CLI. Tests are
   vitest one-shot (`npm test` = `vitest run`).
+- Lint is **oxlint + Prettier** (`npm run lint`; `lint:fix` applies both). ESLint
+  cannot run under TypeScript 7 — do not add `typescript-eslint`.
+- `npm run test:coverage` enforces the CI coverage thresholds (lines 90 /
+  statements 89 / functions 92 / branches 83); the unit suite is DB-free.
 - Customer-key admin runs via `npm run keys:create|keys:list|keys:revoke` (tsx) and
   needs `DATABASE_URL`; key verification is cached (`API_KEY_CACHE_TTL_MS`, default
   30 s), so revocation/scope changes take up to that long per instance.
-- `npm test`, `npm run typecheck`, `npm run lint` must pass before any commit.
+- `npm run lint`, `npm run typecheck`, `npm run test:coverage` must pass before any
+  commit (`npm test` is the fast DB-free subset).

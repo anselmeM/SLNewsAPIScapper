@@ -17,6 +17,7 @@ import { swaggerSpec } from './config/swagger.js';
 import { describeAuthentication, requireAuthentication } from './auth/requireAuthentication.js';
 import { requireScopes } from './auth/authorize.js';
 import { SCOPES } from './auth/apiKeys.js';
+import { assertRuntimeEnv } from './config/env.js';
 import logger, { LOG_REDACTION } from './logger.js';
 import { positiveIntFromEnv, requestIdMiddleware, runtimeMetrics } from './observability.js';
 
@@ -50,9 +51,9 @@ function rateLimitKey(req: express.Request): string {
 
 /** Minimal logger surface the shutdown / fatal-error handlers need (pino-compatible). */
 interface ShutdownLogger {
-  info: (...args: any[]) => void;
-  error: (...args: any[]) => void;
-  fatal: (...args: any[]) => void;
+  info: (...args: unknown[]) => void;
+  error: (...args: unknown[]) => void;
+  fatal: (...args: unknown[]) => void;
 }
 
 /** The subset of `node:http`'s Server that the shutdown handler drives. */
@@ -164,7 +165,7 @@ export function resolveCorsOrigin(
 
 /** Process-like target for the signal/fatal handlers (injectable in tests). */
 export interface ProcessHandlerTarget {
-  on(event: string, listener: (...args: any[]) => void): unknown;
+  on(event: string, listener: (...args: unknown[]) => void): unknown;
 }
 
 export interface ProcessHandlerOptions {
@@ -207,12 +208,10 @@ app.set('trust proxy', parseTrustProxyHops(process.env.TRUST_PROXY_HOPS));
 app.use(helmet());
 app.use(compression());
 
+// The `*` fallback is kept for backward compatibility; the production warning
+// about it is emitted once by `assertRuntimeEnv` in the startup block below so
+// all boot warnings share one log path.
 const corsResolution = resolveCorsOrigin(process.env.NODE_ENV, process.env.CORS_ORIGIN);
-if (corsResolution.warning) {
-  // One startup warning: the wildcard stays for backward compatibility, but an
-  // operator should know the API is callable from any browser origin.
-  logger.warn(corsResolution.warning);
-}
 app.use(
   cors({
     origin: corsResolution.origin,
@@ -402,6 +401,11 @@ let server: ReturnType<typeof app.listen> | undefined;
 // Tests import the app only: never listen, never install process handlers, never
 // call process.exit from a test worker.
 if (process.env.NODE_ENV !== 'test') {
+  // Fail fast before opening a socket: a broken boot configuration should surface
+  // in the deploy logs immediately instead of as per-request 500s. No-ops under
+  // NODE_ENV=test, so importing the app in tests is unaffected.
+  assertRuntimeEnv();
+
   server = app.listen(PORT, () => {
     logger.info({ port: PORT }, 'Sierra Leone News API started');
   });

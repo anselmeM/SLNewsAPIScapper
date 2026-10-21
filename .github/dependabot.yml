@@ -1,0 +1,12 @@
+version: 2
+updates:
+  # Keep the commit-SHA pins in .github/workflows/*.yml current. Dependabot
+  # rewrites the pinned SHA (and the `# vX.Y.Z` comment) in a PR, so a floating
+  # tag is never required for updates.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore(ci)

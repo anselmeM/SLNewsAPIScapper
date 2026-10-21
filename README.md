@@ -223,9 +223,12 @@ Every stored date and body records **why** it has the value it does, so bad publ
 | `npm run dev:all`           | Run ingestion once, then start the API (`tsx src/index.ts`)                              |
 | `npm start`                 | Start the compiled API (`node dist/server.js`)                                           |
 | `npm run scrape`            | Run one ingestion cycle and exit (`tsx src/scrape.ts`)                                   |
-| `npm test`                  | Run the Vitest suite once (`vitest run`)                                                 |
+| `npm test`                  | Run the Vitest unit suite once (`vitest run`)                                            |
+| `npm run test:coverage`     | Unit suite with V8 coverage; enforces the configured thresholds (used in CI)             |
 | `npm run typecheck`         | Typecheck the project (`tsc --noEmit`)                                                   |
-| `npm run lint`              | Prettier check on `src/`                                                                 |
+| `npm run lint`              | oxlint then Prettier check (`oxlint src` + `prettier --check "src/**/*.ts"`)             |
+| `npm run lint:oxlint`       | oxlint only (correctness + no-unused-vars/prefer-const/no-explicit-any)                  |
+| `npm run lint:fix`          | oxlint `--fix` followed by Prettier `--write`                                            |
 | `npm run format`            | Prettier write on `src/`                                                                 |
 | `npm run db:push`           | Push the Prisma schema without migrations (local/dev only)                               |
 | `npm run db:migrate:deploy` | Apply committed migrations (`prisma migrate deploy`)                                     |
@@ -239,7 +242,7 @@ Every stored date and body records **why** it has the value it does, so bad publ
 
 Two suites, split by whether they need a database:
 
-- **Unit suite — `npm test`** (`vitest run`). Database-free and fast: every Prisma call is mocked. This is what the pre-push hook and the CI `test` job run, and it stays that way — `vitest.config.mts` explicitly excludes `src/__tests__/integration/`.
+- **Unit suite — `npm test` / `npm run test:coverage`** (`vitest run [--coverage]`). Database-free and fast: every Prisma call is mocked. This is what the pre-push hook and the CI `test` job run, and it stays that way — `vitest.config.mts` explicitly excludes `src/__tests__/integration/`.
 - **Real-Postgres integration suite — `npm run test:integration`** (`vitest run --config vitest.integration.config.mts`). Runs against a live PostgreSQL database to exercise what mocked tests cannot: the committed migrations (`prisma migrate deploy`), pagination/keyset over duplicate dates, `q`/category/`from`–`to` filters as real SQL, missing-date provenance exclusion on `/v1/*` vs inclusion on legacy `/api/*`, customer API-key scopes + usage metering, `/api/stats` provenance counters, and `Article.link` uniqueness.
 
   CI runs this automatically in the `integration` job against a `postgres:16` service container. To run it locally, use a **disposable** database (the suite truncates `Article`, `Video`, `ApiKey` and `ApiKeyUsage` before every test — never point it at production):
@@ -254,29 +257,39 @@ Two suites, split by whether they need a database:
 
   Without `DATABASE_URL` the suite skips cleanly (`9 skipped`, exit 0), so local unit runs never require a database. The integration suite is a representative slice of the HTTP/SQL surface, not a replacement for the unit suite.
 
+**Coverage is enforced in CI.** The `test` job runs `npm run test:coverage` (@vitest/coverage-v8, lcov + text in `coverage/`, which is gitignored), with thresholds **lines 90, statements 89, functions 92, branches 83** — measured on the unit suite at 92.89% lines / 91.73% statements / 94.23% functions / 86.37% branches, so the gates sit just below current coverage. Coverage is unit-suite only (the integration suite is excluded); a regression below a threshold fails the build.
+
+## Lint tooling
+
+The repo lints with **[oxlint](https://oxc.rs)** followed by Prettier — not ESLint. ESLint/typescript-eslint cannot run here: this repo uses **TypeScript 7** (the native `tsgo` compiler, which has no JS compiler API), and typescript-eslint 8.x hard-fails with _"does not support TS 7.0"_. [typescript-eslint issue #10940](https://github.com/typescript-eslint/typescript-eslint/issues/10940) tracks TS7 support.
+
+- `npm run lint` runs `oxlint src` (correctness category plus `no-unused-vars`, `prefer-const`, `typescript/no-explicit-any`) and then `prettier --check "src/**/*.ts"`.
+- `npm run lint:oxlint` runs only the oxlint pass; `npm run lint:fix` applies `oxlint --fix` then Prettier `--write`.
+- Configuration lives in `.oxlintrc.json` (`dist/`, `coverage/`, `node_modules/` ignored). Prettier remains the formatter.
+
 ## Environment variables
 
-| Variable                   | Required          | Default                 | Purpose                                                                     |
-| -------------------------- | ----------------- | ----------------------- | --------------------------------------------------------------------------- |
-| `DATABASE_URL`             | Yes               | —                       | PostgreSQL connection string (Neon in production)                           |
-| `API_KEY`                  | Yes in production | —                       | Static bearer key. Without it (and without Clerk) data routes return `500`  |
-| `PORT`                     | No                | `3000`                  | HTTP port                                                                   |
-| `NODE_ENV`                 | No                | `development`           | `production` enables JSON logs and production behavior                      |
-| `LOG_LEVEL`                | No                | `info` (prod) / `debug` | Pino log level                                                              |
-| `CORS_ORIGIN`              | No                | `*`                     | Allowed browser origin(s); pin it in production                             |
-| `CLERK_SECRET_KEY`         | No                | —                       | Enables Clerk session-JWT auth alongside `API_KEY`                          |
-| `CLERK_AUTHORIZED_PARTIES` | No                | —                       | Comma-separated `azp` allowlist for Clerk JWTs                              |
-| `STATIC_KEY_SCOPES`        | No                | `internal:read,v1:read` | Scopes granted to the static `API_KEY` (narrow in production)               |
-| `CLERK_SCOPES`             | No                | `internal:read,v1:read` | Scopes granted to verified Clerk session JWTs (narrow in production)        |
-| `API_KEY_CACHE_TTL_MS`     | No                | `30000` (30 s)          | Customer-key verification cache TTL; bounds revocation/scope-change lag     |
-| `TRUST_PROXY_HOPS`         | No                | `1`                     | Reverse-proxy hops trusted for `X-Forwarded-For`                            |
-| `RATE_LIMIT_MAX`           | No                | `100`                   | Max API requests per window per caller                                      |
-| `RATE_LIMIT_WINDOW_MS`     | No                | `900000` (15 min)       | Rate-limit window shared by the API and docs limiters                       |
-| `DOCS_RATE_LIMIT_MAX`      | No                | `300`                   | Max `/docs` + `/v1/docs` requests per window (separate budget)              |
-| `VIDEO_SYNC_COOLDOWN_MS`   | No                | `30000` (30 s)          | Cooldown after `POST /api/videos/sync`; `0` disables it                     |
-| `FRESHNESS_MAX_AGE_MS`     | No                | `7200000` (2 h)         | Ingestion lag above which `/api/stats` marks a feed `stale`                 |
-| `INGESTION_DEADLINE_MS`    | No                | `2700000` (45 min)      | Wall-clock budget per ingestion cycle; stops starting new work when reached |
-| `SCRAPER_USER_AGENT`       | No                | browser-like Chrome UA  | User-Agent override for all scraper HTTP requests                           |
+| Variable                   | Required          | Default                 | Purpose                                                                                         |
+| -------------------------- | ----------------- | ----------------------- | ----------------------------------------------------------------------------------------------- |
+| `DATABASE_URL`             | Yes               | —                       | PostgreSQL connection string (Neon in production)                                               |
+| `API_KEY`                  | Yes in production | —                       | Static bearer key. In production the server fails fast at boot without it or `CLERK_SECRET_KEY` |
+| `PORT`                     | No                | `3000`                  | HTTP port                                                                                       |
+| `NODE_ENV`                 | No                | `development`           | `production` enables JSON logs and production behavior                                          |
+| `LOG_LEVEL`                | No                | `info` (prod) / `debug` | Pino log level                                                                                  |
+| `CORS_ORIGIN`              | No                | `*`                     | Allowed browser origin(s); pin it in production                                                 |
+| `CLERK_SECRET_KEY`         | No                | —                       | Enables Clerk session-JWT auth alongside `API_KEY`                                              |
+| `CLERK_AUTHORIZED_PARTIES` | No                | —                       | Comma-separated `azp` allowlist for Clerk JWTs                                                  |
+| `STATIC_KEY_SCOPES`        | No                | `internal:read,v1:read` | Scopes granted to the static `API_KEY` (narrow in production)                                   |
+| `CLERK_SCOPES`             | No                | `internal:read,v1:read` | Scopes granted to verified Clerk session JWTs (narrow in production)                            |
+| `API_KEY_CACHE_TTL_MS`     | No                | `30000` (30 s)          | Customer-key verification cache TTL; bounds revocation/scope-change lag                         |
+| `TRUST_PROXY_HOPS`         | No                | `1`                     | Reverse-proxy hops trusted for `X-Forwarded-For`                                                |
+| `RATE_LIMIT_MAX`           | No                | `100`                   | Max API requests per window per caller                                                          |
+| `RATE_LIMIT_WINDOW_MS`     | No                | `900000` (15 min)       | Rate-limit window shared by the API and docs limiters                                           |
+| `DOCS_RATE_LIMIT_MAX`      | No                | `300`                   | Max `/docs` + `/v1/docs` requests per window (separate budget)                                  |
+| `VIDEO_SYNC_COOLDOWN_MS`   | No                | `30000` (30 s)          | Cooldown after `POST /api/videos/sync`; `0` disables it                                         |
+| `FRESHNESS_MAX_AGE_MS`     | No                | `7200000` (2 h)         | Ingestion lag above which `/api/stats` marks a feed `stale`                                     |
+| `INGESTION_DEADLINE_MS`    | No                | `2700000` (45 min)      | Wall-clock budget per ingestion cycle; stops starting new work when reached                     |
+| `SCRAPER_USER_AGENT`       | No                | browser-like Chrome UA  | User-Agent override for all scraper HTTP requests                                               |
 
 ## Deploy to Render
 
@@ -290,7 +303,7 @@ Two suites, split by whether they need a database:
 Setup:
 
 1. Click the button above, or on Render choose **New → Blueprint** and connect this repo.
-2. Provide `DATABASE_URL` and `API_KEY` when prompted (plus optional `CORS_ORIGIN`, `CLERK_SECRET_KEY`, `CLERK_AUTHORIZED_PARTIES`, `STATIC_KEY_SCOPES`, `CLERK_SCOPES`, `API_KEY_CACHE_TTL_MS`, `FRESHNESS_MAX_AGE_MS`, `INGESTION_DEADLINE_MS`, `SCRAPER_USER_AGENT`). **`API_KEY` is required**: without it every data route returns `500`, while the liveness probe `/api/health` still reports green (it does not check the database or auth).
+2. Provide `DATABASE_URL` and `API_KEY` when prompted (plus optional `CORS_ORIGIN`, `CLERK_SECRET_KEY`, `CLERK_AUTHORIZED_PARTIES`, `STATIC_KEY_SCOPES`, `CLERK_SCOPES`, `API_KEY_CACHE_TTL_MS`, `FRESHNESS_MAX_AGE_MS`, `INGESTION_DEADLINE_MS`, `VIDEO_SYNC_COOLDOWN_MS`, `DOCS_RATE_LIMIT_MAX`, `SCRAPER_USER_AGENT`). **`API_KEY` is required in production**: the server now fails fast at boot if neither `API_KEY` nor `CLERK_SECRET_KEY` is set (it no longer starts up and serves 500s on every data route). The scrape worker still runs without API credentials.
 3. **The cron service needs a paid plan.** Render does not offer free cron jobs; the blueprint uses `plan: starter` (smallest paid plan). The web service can stay on the free plan, which spins down after inactivity.
 4. Deploy. The web build applies committed migrations with `prisma migrate deploy` before compiling.
 
@@ -315,7 +328,7 @@ If you run `db:baseline` against a database on which the baseline SQL was never 
 
 - The `20261021120000_api_keys` migration creates `ApiKey` and `ApiKeyUsage`. The web build applies it with `prisma migrate deploy` like any other migration (an existing database still needs its one-time baseline first).
 - Run the admin CLI with `DATABASE_URL` pointing at the production database (locally or in a one-off Render shell/job): `npm run keys:create -- --name "Acme News" --scopes v1:read`, then `npm run keys:list` / `npm run keys:revoke -- --id <n>`.
-- Static `API_KEY` and Clerk behaviour is unchanged by this migration. A **DB-keys-only** deployment is not supported: the server still requires at least one of `API_KEY` / `CLERK_SECRET_KEY`, otherwise every data route returns the legacy `500` misconfiguration.
+- Static `API_KEY` and Clerk behaviour is unchanged by this migration. A **DB-keys-only** deployment is not supported: the server requires at least one of `API_KEY` / `CLERK_SECRET_KEY` and now fails fast at boot without them.
 
 ### Docker (optional)
 
@@ -330,9 +343,10 @@ The image runs as a non-root user with `NODE_ENV=production`, and `/docs` resolv
 
 ## Operations
 
+- **Startup validation.** `src/config/env.ts` validates the environment **before any socket is opened** and exits `1` on hard errors: missing `DATABASE_URL`, invalid `NODE_ENV` (must be `development`/`test`/`production`), invalid `PORT` (integer 1–65535), or production without either `API_KEY` or `CLERK_SECRET_KEY` for the HTTP server. Malformed numeric tunables (`RATE_LIMIT_MAX`, `RATE_LIMIT_WINDOW_MS`, `TRUST_PROXY_HOPS`, `API_KEY_CACHE_TTL_MS`, `DOCS_RATE_LIMIT_MAX`, `VIDEO_SYNC_COOLDOWN_MS`, `INGESTION_DEADLINE_MS`, `FRESHNESS_MAX_AGE_MS`) and a production `CORS_ORIGIN` left unset are **warnings** — the built-in defaults are used. The scrape worker (`npm run scrape`) and `--scrape-only` intentionally validate without requiring API credentials because they never serve HTTP. Request-time auth behaviour is unchanged (401/403/503, fail-closed 500 when nothing is configured).
 - **Graceful shutdown.** On `SIGTERM`/`SIGINT` the server stops accepting connections and drains idle ones, then disconnects Prisma and exits `0`. A 10 s force-exit fallback is `unref()`ed and cleared on the graceful path, duplicate signals are ignored, and a failed Prisma disconnect still exits `0` (logged as an error). The handler is exported as `createShutdownHandler` and unit-tested.
 - **Fatal errors.** `unhandledRejection` and `uncaughtException` are logged (name/message/stack, no request bodies or credentials) and exit `1` instead of leaving a half-alive process that the platform keeps routing traffic to.
-- **CORS.** `CORS_ORIGIN` unset falls back to `*` for backward compatibility, but a production startup now logs **one warning** telling the operator to set it. Configure `CORS_ORIGIN` in production.
+- **CORS.** `CORS_ORIGIN` unset falls back to `*` for backward compatibility, but the startup validation logs **one warning** in production telling the operator to set it. Configure `CORS_ORIGIN` in production.
 - **Logging.** Production logs are JSON (pino); `pino-pretty` is a **devDependency** used only for local development and is never loaded in production (it is not needed at runtime).
 
 ## Repository hygiene
@@ -345,14 +359,16 @@ The image runs as a non-root user with `NODE_ENV=production`, and `/docs` resolv
 
 `.github/workflows/ci.yml` runs on pushes to `master`/`main` and on pull requests:
 
-- `lint-and-typecheck` — Prisma validate, Prettier, `tsc --noEmit`
-- `test` — Vitest unit suite (database-free; the integration suite is excluded)
+- `lint-and-typecheck` — Prisma validate, `npm run lint` (oxlint + Prettier), `tsc --noEmit`
+- `test` — Vitest unit suite with enforced coverage thresholds (`npm run test:coverage`; database-free, integration suite excluded)
 - `integration` — real-Postgres integration suite against a `postgres:16` service container (applies migrations, then runs `npm run test:integration`)
 - `build` — `npm run build` (no database needed)
 - `docker` — image build on pull requests only
 - `audit` — `npm audit --omit=dev --audit-level=high`
 
 All jobs run with `contents: read`, per-job timeouts, and workflow-level `concurrency` with `cancel-in-progress`. Render's `autoDeployTrigger: checksPass` means `master` only deploys after these checks are green.
+
+**Supply chain:** every third-party action is pinned to a full commit SHA with the release in a comment (`actions/checkout@v4.4.0`, `actions/setup-node@v4.4.0`, `docker/setup-buildx-action@v3.12.0`, `docker/build-push-action@v6.19.2`). `.github/dependabot.yml` watches the `github-actions` ecosystem weekly (max 5 open PRs, `chore(ci):` prefix) and rewrites the pinned SHA — no floating tags are used.
 
 ## License
 
