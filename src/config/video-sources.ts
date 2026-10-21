@@ -2,28 +2,45 @@ export interface VideoSourceConfig {
   name: string;
   channelId: string;
   category: string[];
+  /** Why this channel is in the rotation; kept for editorial clarity. */
+  note?: string;
 }
 
+/**
+ * Popular Sierra Leone news channels, verified against YouTube's Atom feeds.
+ *
+ * Each entry was resolved from its real channel and its feed was checked to
+ * return recent uploads (see the video-sources test for ID-shape/uniqueness).
+ * The scrape keeps the newest uploads from all of them; the API sorts by
+ * `publishedAt desc`, so the rail is "newest across popular channels".
+ *
+ * Channels that went dormant (Swit Salone, Sierra Loaded, Salone News,
+ * sierraleonenews) were removed rather than left to return stale clips.
+ */
 export const SIERRA_LEONE_VIDEO_SOURCES: VideoSourceConfig[] = [
   {
-    name: 'AYV News Sierra Leone',
-    channelId: 'UC6L0-X7Vb7iK2fN5iW6gZ0Q',
+    name: 'AYV Media Empire',
+    channelId: 'UCAAeZ5UM1LURZSWPGhteWpw',
     category: ['National', 'News'],
+    note: 'AYV primetime news and Wake Up Sierra Leone.',
   },
   {
-    name: 'SLBC National TV',
-    channelId: 'UCe-bL9V3nL0xT_qW0zS9w9A',
+    name: 'AYV News',
+    channelId: 'UCou7SVOayoBeRMKURHHjlvw',
+    category: ['National', 'News'],
+    note: 'AYV news desk clips.',
+  },
+  {
+    name: 'SLBC News',
+    channelId: 'UCEtHh4-TrhA-4BYgoGyCONQ',
     category: ['National', 'Broadcast'],
+    note: 'State broadcaster, daily news bulletins.',
   },
   {
-    name: 'Switsalone',
-    channelId: 'UCqH-wUjX5fV_1yB6uE4Q7kA',
+    name: 'Vickie Remoe',
+    channelId: 'UCXMnWFC9lQVYepr4yfFjhlQ',
     category: ['Culture', 'Society'],
-  },
-  {
-    name: 'SierraLoaded',
-    channelId: 'UC_sierraloaded_official',
-    category: ['Entertainment', 'News'],
+    note: 'Sierra Leonean documentary and culture channel.',
   },
 ];
 
