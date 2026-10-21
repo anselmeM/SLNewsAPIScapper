@@ -50,7 +50,7 @@ Credentials carry scopes: **`v1:read`** for the sellable `/v1/*` routes and **`i
 | GET    | `/api/videos`      | Bearer · `internal:read` | **Internal** videos (legacy page/limit pagination; `channel`, `category`, `q`)                                                 |
 | GET    | `/api/videos/:id`  | Bearer · `internal:read` | Video by numeric ID or YouTube video ID                                                                                        |
 | POST   | `/api/videos/sync` | Bearer · `internal:read` | Trigger a synchronous video feed ingestion                                                                                     |
-| GET    | `/api/stats`       | Bearer · `internal:read` | Aggregate counts, runtime metrics and freshness                                                                                |
+| GET    | `/api/stats`       | Bearer · `internal:read` | Aggregate counts, runtime metrics, freshness and data-quality counters                                                         |
 | GET    | `/api/health`      | Public                   | **Liveness** — 200 while the process is alive; never queries the database                                                      |
 | GET    | `/api/ready`       | Public                   | **Readiness** — cached database probe; 503 when the database is unreachable                                                    |
 | GET    | `/v1/news`         | Bearer · `v1:read`       | **Sellable** paginated article metadata + summary (`page`/`cursor`, `page_size`, `source`, `category`, `from`, `to`, `q`)      |
@@ -121,6 +121,7 @@ External alerting is not wired up in this repo (no Sentry/OTel/Prometheus), so h
 - Poll `/api/ready` and page on `503` (database unreachable).
 - Poll `/api/stats` (bearer key required) and alert on `freshness.articles.stale` / `freshness.videos.stale`. `freshness.*.lag_seconds` is the current ingestion delay; a feed with no ingested data reports `lag_seconds: null` and `stale: true` (no data is not healthy). The threshold is `FRESHNESS_MAX_AGE_MS` (default 2 hours).
 - Use `X-Request-Id` to correlate a support report with the matching access-log line or 5xx error.
+- Track the data-quality counters on `/api/stats`: `articles.missing_date`, `articles.empty_content` and `videos.missing_date`. Rising `empty_content`/`missing_date` means extraction or repair is falling behind.
 - `/api/stats` `runtime` (`uptime_seconds`, `process_started_at`, `memory_rss_mb`, `node_version`, `requests_total`, `requests_by_status`) describes the current process only: the counters are in-memory and reset on every deploy/restart, so treat them as process-local signals rather than durable metrics.
 
 ### Pagination
@@ -175,6 +176,26 @@ The migration runs as part of the normal deploy (`prisma migrate deploy`), needs
 - **User agent.** Defaults to the existing browser-like Chrome UA; set `SCRAPER_USER_AGENT` to a descriptive bot identifier without changing scraping behaviour.
 
 **Known limitations:** there is no persisted sitemap cursor or `<lastmod>` high-water mark, so each run still re-reads the newest sitemap pages; URL canonicalization is unchanged (scheme/`www`/AMP variants can still create duplicate rows); category taxonomy normalization and the empty `category` on sitemap-ingested archive rows are untouched; existing video rows are still skipped rather than refreshed.
+
+## Data quality and provenance
+
+Every stored date and body records **why** it has the value it does, so bad publisher markup cannot silently poison the sellable feed.
+
+**Date provenance.** `pubDate` (articles) and `publishedAt` (videos) carry a source: `published` (trusted), `clamped` (an implausible date was adjusted), or `missing` (no usable date). The publisher's original string is retained in `pubDateRaw`/`publishedAtRaw`. Parsing never throws:
+
+- blank or unparseable → stored as the ingestion time, flagged `missing`;
+- more than **24 hours in the future** → clamped to `now`, flagged `clamped`;
+- more than **10 years old** → clamped to the 10-year floor, flagged `clamped`.
+
+**Sellable feeds exclude undated rows.** `/v1/news` and `/v1/videos` filter out rows whose date source is `missing`, so customers never see an item the pipeline knows is undated. The legacy `/api/news` and `/api/videos` routes (used by the pinned SLNews app) **do** include them, because the app needs every article. (Rows created before this change predate the flag — see Known gaps.)
+
+**Content provenance.** `contentSource` is `page` (body fetched from the article page), `feed` (body came from the feed payload), or `empty` (no body found); legacy rows may be `null` (unknown) or the older `summary` marker. `contentAttempts` and `lastContentAttemptAt` track failed extraction attempts. Sitemap ingestion no longer fabricates a body from the summary — a page with no extractable paragraphs is stored as `paragraphs: []` with `contentSource: 'empty'`, and a non-empty body is never overwritten.
+
+**Bounded repair.** Existing feed-seen rows with an empty body are repaired inline during the feed pass, and a sweep after the feeds retries up to **5 articles per run**, **3 attempts each**, within a 60 s budget and the run deadline (pending rows wait for the next hourly run).
+
+**Monitoring counters.** `/api/stats` (and `/v1/stats`) include `articles.missing_date`, `articles.empty_content` (rows whose `contentSource` is `empty` or the legacy `summary`) and `videos.missing_date`. Articles and videos also have an `updatedAt` timestamp now.
+
+**Known gaps:** legacy rows keep `contentSource: null` and an assumed `published` date source (there is no historical re-parse/backfill, so pre-existing undated rows are still served by `/v1` until re-ingested); existing video rows are skipped and not retro-repaired; undated rows are hidden from `/v1` rather than moved to a quarantine table; there is no admin tooling for provenance review/repair; and date accuracy still depends on publisher markup.
 
 ## Scripts
 

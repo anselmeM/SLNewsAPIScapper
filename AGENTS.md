@@ -58,23 +58,34 @@ Standard push flow: `bash "C:\Users\amotc\.agents\skills\git-pushing\scripts\sma
   `npm run keys:create -- --name "<customer>" --scopes v1:read [--expires-at ISO]`,
   `npm run keys:list`, `npm run keys:revoke -- --id <n>`; needs `DATABASE_URL`,
   stores only SHA-256 hashes, and prints the raw `slk_...` key once.
-- `src/routes/news.ts` — legacy `/api/news` (FULL TEXT — app-internal path).
+- `src/routes/news.ts` — legacy `/api/news` (FULL TEXT — app-internal path); still
+  serves rows with `pubDateSource: 'missing'`, unlike the sellable `/v1` feed.
 - `src/routes/v1.ts` — `/v1/news` business contract: **metadata + summary ONLY,
-  never `paragraphs`** (`ARTICLE_META_SELECT`). `{ data, meta }` envelope.
+  never `paragraphs`** (`ARTICLE_META_SELECT`). `{ data, meta }` envelope. Excludes
+  `pubDateSource: 'missing'` rows from the sellable feed.
 - `src/routes/videos.ts` / `src/routes/v1-videos.ts` — `/api/videos` (internal)
-  and `/v1/videos` (sellable metadata contract), plus `POST /api/videos/sync`.
-- `src/routes/stats.ts` — `/api/stats` and `/v1/stats` aggregate counts/freshness.
-- `src/services/scraper.ts` — RSS + sitemap ingestion, retry/backoff, upsert on
-  link, metadata backfill inline per feed item (article-page image fetches capped
-  at 10 per run inside a 60 s budget).
-- `src/services/video-scraper.ts` — YouTube feed ingestion.
+  and `/v1/videos` (sellable metadata contract, excludes
+  `publishedAtSource: 'missing'`), plus `POST /api/videos/sync`.
+- `src/routes/stats.ts` — `/api/stats` and `/v1/stats` aggregate counts/freshness
+  plus data-quality counters (`articles.missing_date`, `articles.empty_content`,
+  `videos.missing_date`).
+- `src/services/scraper.ts` — RSS + sitemap ingestion with retry/backoff, upsert on
+  link, date/content provenance, metadata backfill inline per feed item
+  (article-page image fetches capped at 10 per run inside a 60 s budget), and a
+  bounded content-repair sweep (5 rows/run, 3 attempts each, run deadline).
+- `src/services/video-scraper.ts` — YouTube feed ingestion with date provenance.
 - `src/utils/` — `http.ts` (retry), `query.ts` (pagination/search/date parsing),
+  `dates.ts` (`parsePublishedDate` → `{ date, source, raw }`, never throws),
   `url.ts` (link normalization).
 - `src/config/` — sources, video sources, Swagger (`swagger.ts` falls back to
   `dist/routes/*.js` so `/docs` works in the Docker image).
 - `prisma/schema.prisma` — `Article`/`Video`/`ApiKey`/`ApiKeyUsage` models on
-  Prisma 7 with `@prisma/adapter-pg`. Migrations: `20261020120000_init` (baseline),
-  `20261021000000_search_indexes`, `20261021120000_api_keys`; deploy with
+  Prisma 7 with `@prisma/adapter-pg`. Migration
+  `20261021130000_date_content_provenance` adds date/content provenance
+  (`pubDateSource`/`publishedAtSource`, `pubDateRaw`/`publishedAtRaw`,
+  `contentSource`, `contentAttempts`, `lastContentAttemptAt`) and `updatedAt`;
+  other migrations: `20261020120000_init` (baseline),
+  `20261021000000_search_indexes`, `20261021120000_api_keys`. Deploy with
   `npm run db:migrate:deploy`, and run `npm run db:baseline` **once** against a
   pre-existing `db:push` database before the first migrate-deploy.
 - `.husky/` — pre-commit (lint-staged), commit-msg (commitlint), pre-push
