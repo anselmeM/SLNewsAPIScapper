@@ -21,6 +21,8 @@ non-negotiable; when in doubt, ask.
 4. **Never rewrite pushed/shared history.** Rebase/squash only on your own
    unpushed branch; if a force-push is unavoidable use `--force-with-lease`.
 5. **No secrets in code.** `DATABASE_URL`, `API_KEY` live in environment settings.
+   Customer API keys are stored only as SHA-256 hashes (`ApiKey.keyHash`); never
+   log or print raw keys/tokens, and never commit a generated `slk_...` key.
 6. Recovery first: `git reflog` (90-day undo), backup branch before risky
    operations, `git revert` (never history-rewrite) to roll back `master`.
 
@@ -41,13 +43,21 @@ Standard push flow: `bash "C:\Users\amotc\.agents\skills\git-pushing\scripts\sma
 
 ## Repository map
 
-- `src/index.ts` / `src/server.ts` — Express app: auth (`requireAuthentication`,
-  Bearer static key or Clerk session JWT, timing-safe), per-credential/IP rate
-  limiter (health exempt), CORS, helmet, JSON 404, terminal error handler,
-  pino-http logging with credential redaction, graceful shutdown.
-- `src/auth/` — `requireAuthentication.ts` (static `API_KEY` + optional Clerk
-  session JWT; fails closed with 500 when neither is configured) and `clerk.ts`
-  (JWT verification / `CLERK_AUTHORIZED_PARTIES` checks).
+- `src/index.ts` / `src/server.ts` — Express app: auth (`requireAuthentication` +
+  `requireScopes`: static key, Clerk JWT, or DB customer key; scope-guarded),
+  per-credential/IP rate limiter (health exempt), CORS, helmet, JSON 404, terminal
+  error handler, pino-http logging with credential redaction, graceful shutdown.
+- `src/auth/` — `requireAuthentication.ts` (static `API_KEY`, optional Clerk
+  session JWT, and `slk_`-prefixed DB customer keys; fails closed with 500 when
+  neither static key nor Clerk is configured), `authorize.ts` (scope guard:
+  `v1:read` on `/v1/*`, `internal:read` on the legacy `/api/*` surface; 403
+  names the missing scope in `required_scope`), `apiKeys.ts` (SHA-256 hashing,
+  cached verification, per-UTC-day usage metering), `clerk.ts` (JWT verification
+  / `CLERK_AUTHORIZED_PARTIES` checks).
+- `src/scripts/api-keys.ts` — customer API key admin via
+  `npm run keys:create -- --name "<customer>" --scopes v1:read [--expires-at ISO]`,
+  `npm run keys:list`, `npm run keys:revoke -- --id <n>`; needs `DATABASE_URL`,
+  stores only SHA-256 hashes, and prints the raw `slk_...` key once.
 - `src/routes/news.ts` — legacy `/api/news` (FULL TEXT — app-internal path).
 - `src/routes/v1.ts` — `/v1/news` business contract: **metadata + summary ONLY,
   never `paragraphs`** (`ARTICLE_META_SELECT`). `{ data, meta }` envelope.
@@ -62,8 +72,9 @@ Standard push flow: `bash "C:\Users\amotc\.agents\skills\git-pushing\scripts\sma
   `url.ts` (link normalization).
 - `src/config/` — sources, video sources, Swagger (`swagger.ts` falls back to
   `dist/routes/*.js` so `/docs` works in the Docker image).
-- `prisma/schema.prisma` — `Article`/`Video` models; Prisma 7 + `@prisma/adapter-pg`.
-  `prisma/migrations/20261020120000_init` is the baseline; deploy with
+- `prisma/schema.prisma` — `Article`/`Video`/`ApiKey`/`ApiKeyUsage` models on
+  Prisma 7 with `@prisma/adapter-pg`. Migrations: `20261020120000_init` (baseline),
+  `20261021000000_search_indexes`, `20261021120000_api_keys`; deploy with
   `npm run db:migrate:deploy`, and run `npm run db:baseline` **once** against a
   pre-existing `db:push` database before the first migrate-deploy.
 - `.husky/` — pre-commit (lint-staged), commit-msg (commitlint), pre-push
@@ -94,4 +105,7 @@ Standard push flow: `bash "C:\Users\amotc\.agents\skills\git-pushing\scripts\sma
   incompatible with TypeScript 7 (no JS compiler API). Do not reintroduce it.
 - Docker is unavailable on this machine; use npm scripts + Vercel CLI. Tests are
   vitest one-shot (`npm test` = `vitest run`).
+- Customer-key admin runs via `npm run keys:create|keys:list|keys:revoke` (tsx) and
+  needs `DATABASE_URL`; key verification is cached (`API_KEY_CACHE_TTL_MS`, default
+  30 s), so revocation/scope changes take up to that long per instance.
 - `npm test`, `npm run typecheck`, `npm run lint` must pass before any commit.
