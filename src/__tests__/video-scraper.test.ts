@@ -6,11 +6,7 @@ import { prisma } from '../db.js';
 vi.mock('../db.js', () => ({
   prisma: {
     video: {
-      count: vi.fn(),
       findMany: vi.fn().mockResolvedValue([]),
-      findUnique: vi.fn(),
-      create: vi.fn(),
-      update: vi.fn(),
       upsert: vi.fn().mockResolvedValue({ id: 1 }),
     },
   },
@@ -31,6 +27,8 @@ vi.mock('axios', () => ({
     get: vi.fn(),
   },
 }));
+
+type Mock = ReturnType<typeof vi.fn>;
 
 const SAMPLE_ATOM_FEED = `<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns:media="http://search.yahoo.com/mrss/" xmlns="http://www.w3.org/2005/Atom">
@@ -58,9 +56,50 @@ const SAMPLE_ATOM_FEED = `<?xml version="1.0" encoding="UTF-8"?>
   </entry>
 </feed>`;
 
+function atomFeedWithTwoVideos(): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns:media="http://search.yahoo.com/mrss/" xmlns="http://www.w3.org/2005/Atom">
+  <title>Test Channel</title>
+  <yt:channelId>UC_TEST_CHANNEL</yt:channelId>
+  <entry>
+    <id>yt:video:videoOne111</id>
+    <yt:videoId>videoOne111</yt:videoId>
+    <title>First Video</title>
+    <link rel="alternate" href="https://www.youtube.com/watch?v=videoOne111"/>
+    <published>2026-09-01T10:00:00+00:00</published>
+    <media:group><media:thumbnail url="https://i.ytimg.com/vi/videoOne111/hqdefault.jpg"/></media:group>
+  </entry>
+  <entry>
+    <id>yt:video:videoTwo222</id>
+    <yt:videoId>videoTwo222</yt:videoId>
+    <title>Second Video</title>
+    <link rel="alternate" href="https://www.youtube.com/watch?v=videoTwo222"/>
+    <published>2026-09-02T10:00:00+00:00</published>
+    <media:group><media:thumbnail url="https://i.ytimg.com/vi/videoTwo222/hqdefault.jpg"/></media:group>
+  </entry>
+</feed>`;
+}
+
+const TEST_SOURCE = {
+  name: 'AYV News Sierra Leone',
+  channelId: 'UC6L0-X7Vb7iK2fN5iW6gZ0Q',
+  category: ['National'],
+};
+
+function videoMocks() {
+  return {
+    findMany: prisma.video.findMany as Mock,
+    upsert: prisma.video.upsert as Mock,
+  };
+}
+
 describe('video-scraper', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    (axios.get as Mock).mockReset();
+    const { findMany, upsert } = videoMocks();
+    findMany.mockReset().mockResolvedValue([]);
+    upsert.mockReset().mockResolvedValue({ id: 1 });
   });
 
   describe('parseYouTubeAtomFeed', () => {
@@ -109,57 +148,53 @@ describe('video-scraper', () => {
   });
 
   describe('syncYouTubeChannel', () => {
-    it('fetches feed and upserts new videos', async () => {
-      (axios.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
-        data: SAMPLE_ATOM_FEED,
-      });
-      (prisma.video.findUnique as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+    it('batches existing-video lookup into one findMany and upserts new videos', async () => {
+      vi.mocked(axios.get).mockResolvedValueOnce({ data: SAMPLE_ATOM_FEED });
 
-      const source = {
-        name: 'AYV News Sierra Leone',
-        channelId: 'UC6L0-X7Vb7iK2fN5iW6gZ0Q',
-        category: ['National'],
-      };
+      const result = await syncYouTubeChannel(TEST_SOURCE);
 
-      const result = await syncYouTubeChannel(source);
       expect(result.ingested).toBe(1);
       expect(result.skipped).toBe(0);
       expect(result.errors).toBe(0);
-      expect(prisma.video.upsert).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: { videoId: '3f4Y2N4w1bY' },
-        }),
-      );
+      expect(videoMocks().findMany).toHaveBeenCalledTimes(1);
+      expect(videoMocks().findMany).toHaveBeenCalledWith({
+        where: { videoId: { in: ['3f4Y2N4w1bY'] } },
+        select: { videoId: true },
+      });
+      expect(videoMocks().upsert).toHaveBeenCalledWith(expect.objectContaining({ where: { videoId: '3f4Y2N4w1bY' } }));
     });
 
-    it('skips existing videos', async () => {
-      (axios.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
-        data: SAMPLE_ATOM_FEED,
-      });
-      (prisma.video.findUnique as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ id: 99 });
+    it('skips existing videos found by the batched lookup', async () => {
+      vi.mocked(axios.get).mockResolvedValueOnce({ data: SAMPLE_ATOM_FEED });
+      videoMocks().findMany.mockResolvedValueOnce([{ videoId: '3f4Y2N4w1bY' }]);
 
-      const source = {
-        name: 'AYV News Sierra Leone',
-        channelId: 'UC6L0-X7Vb7iK2fN5iW6gZ0Q',
-        category: ['National'],
-      };
+      const result = await syncYouTubeChannel(TEST_SOURCE);
 
-      const result = await syncYouTubeChannel(source);
       expect(result.ingested).toBe(0);
       expect(result.skipped).toBe(1);
-      expect(prisma.video.upsert).not.toHaveBeenCalled();
+      expect(videoMocks().upsert).not.toHaveBeenCalled();
+    });
+
+    it('uses one findMany for a multi-video channel and upserts each new video', async () => {
+      vi.mocked(axios.get).mockResolvedValueOnce({ data: atomFeedWithTwoVideos() });
+
+      const result = await syncYouTubeChannel(TEST_SOURCE);
+
+      expect(result.ingested).toBe(2);
+      expect(result.skipped).toBe(0);
+      expect(videoMocks().findMany).toHaveBeenCalledTimes(1);
+      expect(videoMocks().findMany).toHaveBeenCalledWith({
+        where: { videoId: { in: ['videoOne111', 'videoTwo222'] } },
+        select: { videoId: true },
+      });
+      expect(videoMocks().upsert).toHaveBeenCalledTimes(2);
     });
 
     it('handles network errors without throwing', async () => {
-      (axios.get as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('Network error'));
+      vi.mocked(axios.get).mockRejectedValueOnce(new Error('Network error'));
 
-      const source = {
-        name: 'Failing Channel',
-        channelId: 'UC_FAILING',
-        category: ['News'],
-      };
+      const result = await syncYouTubeChannel({ name: 'Failing Channel', channelId: 'UC_FAILING', category: ['News'] });
 
-      const result = await syncYouTubeChannel(source);
       expect(result.errors).toBe(1);
       expect(result.ingested).toBe(0);
     });
@@ -167,14 +202,22 @@ describe('video-scraper', () => {
 
   describe('runSierraLeoneVideoIngestion', () => {
     it('processes all configured sources and aggregates stats', async () => {
-      (axios.get as ReturnType<typeof vi.fn>).mockResolvedValue({
-        data: SAMPLE_ATOM_FEED,
-      });
-      (prisma.video.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+      vi.mocked(axios.get).mockResolvedValue({ data: SAMPLE_ATOM_FEED });
 
       const stats = await runSierraLeoneVideoIngestion();
+
       expect(stats.totalIngested).toBeGreaterThanOrEqual(1);
       expect(stats.totalErrors).toBe(0);
+    });
+
+    it('skips all channels when the deadline has already passed', async () => {
+      vi.mocked(axios.get).mockResolvedValue({ data: SAMPLE_ATOM_FEED });
+
+      const stats = await runSierraLeoneVideoIngestion(Date.now() - 1000);
+
+      expect(axios.get).not.toHaveBeenCalled();
+      expect(videoMocks().findMany).not.toHaveBeenCalled();
+      expect(stats).toEqual({ totalIngested: 0, totalSkipped: 0, totalErrors: 0 });
     });
   });
 });
