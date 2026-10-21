@@ -6,6 +6,12 @@ generator client {
   provider = "prisma-client-js"
 }
 
+// NOTE: the pg_trgm (gin_trgm_ops) indexes backing the ILIKE '%term%' search
+// predicates (Article.title/description, Video.title/description/channelTitle)
+// live only in migrations/20261021000000_search_indexes/migration.sql — Prisma
+// cannot model non-default index operator classes, so `migrate dev` must never
+// be allowed to drop them.
+
 model Article {
   id          Int      @id @default(autoincrement())
   title       String
@@ -22,6 +28,9 @@ model Article {
   @@index([pubDate])
   @@index([source])
   @@index([createdAt])
+  @@index([source, pubDate])
+  @@index([pubDate, id])
+  @@index([category], type: Gin)
 }
 
 model Video {
@@ -40,4 +49,7 @@ model Video {
   @@index([publishedAt])
   @@index([channelTitle])
   @@index([createdAt])
+  @@index([channelTitle, publishedAt])
+  @@index([publishedAt, id])
+  @@index([category], type: Gin)
 }

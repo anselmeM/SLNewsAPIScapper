@@ -3,13 +3,12 @@ import type { Prisma } from '@prisma/client';
 import { prisma } from '../db.js';
 import { SIERRA_LEONE_SOURCES } from '../config/sources.js';
 import { parsePositiveInt, parseSearchQuery } from '../utils/query.js';
+import { parsePagination } from '../utils/pagination.js';
 import logger from '../logger.js';
 
 const router = Router();
 
 const VALID_SOURCES = SIERRA_LEONE_SOURCES.map((s) => s.name);
-const MAX_LIMIT = 100;
-const DEFAULT_LIMIT = 20;
 
 interface NewsQueryOptions {
   orderBy: Array<{ pubDate: 'desc' } | { id: 'desc' }>;
@@ -38,6 +37,7 @@ interface NewsQueryOptions {
  *         schema:
  *           type: integer
  *           minimum: 1
+ *           maximum: 10000
  *           default: 1
  *         description: Page number for pagination (1-based)
  *       - in: query
@@ -66,22 +66,20 @@ router.get('/', async (req: Request, res: Response) => {
   try {
     const { source, limit, page, q } = req.query;
 
-    const parsedLimit = parsePositiveInt(limit, DEFAULT_LIMIT);
-    if (Number.isNaN(parsedLimit)) {
-      return res.status(400).json({ error: 'limit must be a positive integer' });
-    }
-
-    const parsedPage = parsePositiveInt(page, 1);
-    if (Number.isNaN(parsedPage)) {
-      return res.status(400).json({ error: 'page must be a positive integer' });
-    }
-
     const { term: searchTerm, error: searchError } = parseSearchQuery(q);
     if (searchError) {
       return res.status(400).json({ error: searchError });
     }
 
-    const take = Math.min(parsedLimit, MAX_LIMIT);
+    // Legacy contract: `limit` above MAX_PAGE_SIZE is still clamped silently
+    // (the pinned app depends on it), but an absurd `page` is now a 400 instead
+    // of an enormous OFFSET / Prisma validation 500.
+    const pagination = parsePagination({ pageRaw: page, limitRaw: limit, clampPageSize: true });
+    if ('error' in pagination) {
+      return res.status(400).json({ error: pagination.error });
+    }
+
+    const take = pagination.pageSize;
 
     const where: Prisma.ArticleWhereInput = {};
 
@@ -105,7 +103,7 @@ router.get('/', async (req: Request, res: Response) => {
       // shuffle articles that share a pubDate between requests.
       orderBy: [{ pubDate: 'desc' }, { id: 'desc' }],
       take,
-      skip: (parsedPage - 1) * take,
+      skip: pagination.skip,
       where: Object.keys(where).length > 0 ? where : undefined,
     };
 

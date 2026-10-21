@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 import type { Express } from 'express';
 import { prisma } from '../db.js';
+import { encodeCursor } from '../utils/pagination.js';
 
 vi.mock('../db.js', () => ({
   prisma: {
@@ -160,6 +161,34 @@ describe('GET /api/news', () => {
     expect(res.body.error).toContain('page');
   });
 
+  it('rejects an absurd page as a 400 instead of a Prisma 500', async () => {
+    const mockFindMany = prisma.article.findMany as ReturnType<typeof vi.fn>;
+    mockFindMany.mockClear();
+
+    for (const page of ['1000000000', '1e21']) {
+      const res = await app.get(`/api/news?page=${page}`).set('Authorization', 'Bearer test-key-123');
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('page');
+    }
+    // The bad page must be rejected before the database is queried.
+    expect(mockFindMany).not.toHaveBeenCalled();
+  });
+
+  it('caps legacy offset pagination at page 10000', async () => {
+    const res = await app.get('/api/news?page=10001').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('page must not exceed 10000');
+  });
+
+  it('still clamps limit above 100 for the pinned legacy client', async () => {
+    const mockFindMany = prisma.article.findMany as ReturnType<typeof vi.fn>;
+    mockFindMany.mockResolvedValueOnce(mockArticles);
+
+    const res = await app.get('/api/news?limit=1000').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(200);
+    expect(mockFindMany).toHaveBeenCalledWith(expect.objectContaining({ take: 100 }));
+  });
+
   it('returns 400 for invalid source', async () => {
     const res = await app.get('/api/news?source=InvalidSource').set('Authorization', 'Bearer test-key-123');
     expect(res.status).toBe(400);
@@ -246,6 +275,36 @@ describe('Versioned API v1', () => {
   // the metadata-only select returns.
   const metaOnlyArticles = mockArticles.map(({ paragraphs: _paragraphs, ...rest }) => rest);
 
+  const cursorRows = [
+    {
+      id: 41,
+      title: 'Cursor A',
+      link: 'https://example.com/cursor-a',
+      description: 'Cursor A summary',
+      category: ['Politics'],
+      pubDate: new Date('2026-08-06T00:00:00.000Z'),
+      source: 'Politico SL',
+    },
+    {
+      id: 40,
+      title: 'Cursor B',
+      link: 'https://example.com/cursor-b',
+      description: 'Cursor B summary',
+      category: ['Politics'],
+      pubDate: new Date('2026-08-05T00:00:00.000Z'),
+      source: 'Politico SL',
+    },
+    {
+      id: 39,
+      title: 'Cursor C',
+      link: 'https://example.com/cursor-c',
+      description: 'Cursor C summary',
+      category: ['Politics'],
+      pubDate: new Date('2026-08-04T00:00:00.000Z'),
+      source: 'Politico SL',
+    },
+  ];
+
   it('returns the contract envelope { data, meta } with a valid key', async () => {
     const mockFindMany = prisma.article.findMany as ReturnType<typeof vi.fn>;
     mockFindMany.mockResolvedValueOnce(metaOnlyArticles);
@@ -262,7 +321,7 @@ describe('Versioned API v1', () => {
       url: 'https://example.com/article-1',
       published_at: '2025-01-01T00:00:00.000Z',
     });
-    expect(res.body.meta).toEqual({ page: 1, page_size: 20, total: 1, has_more: false });
+    expect(res.body.meta).toEqual({ page: 1, page_size: 20, total: 1, has_more: false, next_cursor: null });
   });
 
   it('never exposes full article text (link + summary model)', async () => {
@@ -293,7 +352,103 @@ describe('Versioned API v1', () => {
     expect(mockFindMany).toHaveBeenCalledWith(
       expect.objectContaining({ take: 10, skip: 10, orderBy: [{ pubDate: 'desc' }, { id: 'desc' }] }),
     );
-    expect(res.body.meta).toEqual({ page: 2, page_size: 10, total: 1, has_more: false });
+    expect(res.body.meta).toEqual({ page: 2, page_size: 10, total: 1, has_more: false, next_cursor: null });
+  });
+
+  it('returns a bootstrap cursor from page mode when more results exist', async () => {
+    const mockFindMany = prisma.article.findMany as ReturnType<typeof vi.fn>;
+    const mockCount = prisma.article.count as ReturnType<typeof vi.fn>;
+    mockFindMany.mockClear();
+    mockCount.mockClear();
+    mockFindMany.mockResolvedValueOnce(mockArticles);
+    mockCount.mockResolvedValueOnce(5);
+
+    const res = await app.get('/v1/news?page_size=1&page=1').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(200);
+    expect(res.body.meta.has_more).toBe(true);
+    // Page mode hands out the keyset position so clients can switch to `cursor=`
+    // without paying for deep OFFSETs/counts on subsequent pages.
+    expect(res.body.meta.next_cursor).toBe(encodeCursor(mockArticles[0].pubDate, mockArticles[0].id));
+  });
+
+  it('paginates with a cursor without running a count query (keyset)', async () => {
+    const mockFindMany = prisma.article.findMany as ReturnType<typeof vi.fn>;
+    const mockCount = prisma.article.count as ReturnType<typeof vi.fn>;
+    mockFindMany.mockClear();
+    mockCount.mockClear();
+
+    const cursorDate = new Date('2026-08-07T12:00:00.000Z');
+    const cursor = encodeCursor(cursorDate, 42);
+    mockFindMany.mockResolvedValueOnce(cursorRows);
+
+    const res = await app
+      .get(`/v1/news?page_size=2&source=Politico%20SL&cursor=${cursor}`)
+      .set('Authorization', 'Bearer test-key-123');
+
+    expect(res.status).toBe(200);
+    const args = mockFindMany.mock.calls[0][0];
+    expect(args.take).toBe(3);
+    expect(args.skip).toBeUndefined();
+    expect(args.orderBy).toEqual([{ pubDate: 'desc' }, { id: 'desc' }]);
+    // Filters stay direct properties; the keyset predicate lives under AND.
+    expect(args.where.source).toBe('Politico SL');
+    expect(args.where.AND).toEqual([
+      { OR: [{ pubDate: { lt: cursorDate } }, { pubDate: cursorDate, id: { lt: 42 } }] },
+    ]);
+    expect(mockCount).not.toHaveBeenCalled();
+
+    expect(res.body.data.map((row: { id: number }) => row.id)).toEqual([41, 40]);
+    expect(res.body.meta).toEqual({
+      page: null,
+      page_size: 2,
+      total: null,
+      has_more: true,
+      next_cursor: encodeCursor(cursorRows[1].pubDate, 40),
+    });
+  });
+
+  it('combines the cursor keyset with the search OR under AND', async () => {
+    const mockFindMany = prisma.article.findMany as ReturnType<typeof vi.fn>;
+    const mockCount = prisma.article.count as ReturnType<typeof vi.fn>;
+    mockFindMany.mockClear();
+    mockCount.mockClear();
+
+    const cursorDate = new Date('2026-08-07T12:00:00.000Z');
+    const cursor = encodeCursor(cursorDate, 42);
+    mockFindMany.mockResolvedValueOnce([cursorRows[0]]);
+
+    const res = await app
+      .get(`/v1/news?q=port&page_size=2&cursor=${cursor}`)
+      .set('Authorization', 'Bearer test-key-123');
+
+    expect(res.status).toBe(200);
+    const args = mockFindMany.mock.calls[0][0];
+    expect(args.where.OR).toBeUndefined();
+    expect(args.where.AND).toEqual([
+      {
+        OR: [
+          { title: { contains: 'port', mode: 'insensitive' } },
+          { description: { contains: 'port', mode: 'insensitive' } },
+        ],
+      },
+      { OR: [{ pubDate: { lt: cursorDate } }, { pubDate: cursorDate, id: { lt: 42 } }] },
+    ]);
+    expect(mockCount).not.toHaveBeenCalled();
+    expect(res.body.meta.has_more).toBe(false);
+    expect(res.body.meta.next_cursor).toBeNull();
+  });
+
+  it('returns 400 when page and cursor are both supplied', async () => {
+    const cursor = encodeCursor(new Date('2026-08-07T00:00:00.000Z'), 1);
+    const res = await app.get(`/v1/news?page=1&cursor=${cursor}`).set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('use either page or cursor, not both');
+  });
+
+  it('returns 400 for an invalid cursor', async () => {
+    const res = await app.get('/v1/news?cursor=not-a-cursor').set('Authorization', 'Bearer test-key-123');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('cursor is invalid');
   });
 
   it('accepts limit as an alias for page_size', async () => {

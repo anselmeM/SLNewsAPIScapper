@@ -2,15 +2,13 @@ import { Router, Request, Response } from 'express';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../db.js';
 import { SIERRA_LEONE_SOURCES } from '../config/sources.js';
-import { parsePositiveInt, parseSearchQuery, parseCategories, parseDateRange } from '../utils/query.js';
+import { parseSearchQuery, parseCategories, parseDateRange } from '../utils/query.js';
+import { parsePagination, parseCursor, encodeCursor } from '../utils/pagination.js';
 import logger from '../logger.js';
 
 const router = Router();
 
 const VALID_SOURCES = SIERRA_LEONE_SOURCES.map((s) => s.name);
-const MAX_PAGE_SIZE = 100;
-const DEFAULT_PAGE_SIZE = 20;
-const MAX_PAGE = 10_000; // cap the offset window; the archive is far smaller
 
 // The sellable contract is metadata + summary only (link + summary model):
 // headline, summary, source, category, pub date, and the link back to the
@@ -24,14 +22,6 @@ const ARTICLE_META_SELECT = {
   link: true,
   pubDate: true,
 } as const;
-
-interface V1QueryOptions {
-  select: typeof ARTICLE_META_SELECT;
-  orderBy: Array<{ pubDate: 'desc' } | { id: 'desc' }>;
-  take: number;
-  skip?: number;
-  where?: Prisma.ArticleWhereInput;
-}
 
 /**
  * @swagger
@@ -59,7 +49,16 @@ interface V1QueryOptions {
  *           type: integer
  *           minimum: 1
  *           default: 1
- *         description: Page number for pagination (1-based)
+ *         description: Page number for pagination (1-based). Cannot be combined with `cursor`.
+ *       - in: query
+ *         name: cursor
+ *         schema:
+ *           type: string
+ *         description: |
+ *           Opaque keyset cursor from a previous response's `meta.next_cursor`.
+ *           Cannot be combined with `page`. In cursor mode `meta.page` and
+ *           `meta.total` are null, the count query is skipped, and
+ *           `meta.next_cursor` is null on the last page.
  *       - in: query
  *         name: source
  *         schema:
@@ -126,16 +125,24 @@ interface V1QueryOptions {
  *                         format: date-time
  *                 meta:
  *                   type: object
- *                   required: [page, page_size, total, has_more]
+ *                   required: [page, page_size, total, has_more, next_cursor]
  *                   properties:
  *                     page:
  *                       type: integer
+ *                       nullable: true
+ *                       description: Page number in offset mode; null in cursor mode
  *                     page_size:
  *                       type: integer
  *                     total:
  *                       type: integer
+ *                       nullable: true
+ *                       description: Exact total in offset mode; null in cursor mode (no count query)
  *                     has_more:
  *                       type: boolean
+ *                     next_cursor:
+ *                       type: string
+ *                       nullable: true
+ *                       description: Opaque keyset cursor for the next page, or null when exhausted
  *       400:
  *         description: Invalid parameters
  *       401:
@@ -149,25 +156,32 @@ interface V1QueryOptions {
  */
 router.get('/', async (req: Request, res: Response) => {
   try {
-    const { category, source, page, page_size, limit, from, to, q } = req.query;
+    const { category, source, page, page_size, limit, from, to, q, cursor } = req.query;
 
     const { term: searchTerm, error: searchError } = parseSearchQuery(q);
     if (searchError) {
       return res.status(400).json({ error: searchError });
     }
 
-    // page_size is the contract param; limit is accepted as a legacy alias.
-    const parsedPageSize = parsePositiveInt(page_size, parsePositiveInt(limit, DEFAULT_PAGE_SIZE));
-    if (Number.isNaN(parsedPageSize) || parsedPageSize > MAX_PAGE_SIZE) {
-      return res.status(400).json({ error: `page_size must be a positive integer up to ${MAX_PAGE_SIZE}` });
+    if (cursor !== undefined && page !== undefined) {
+      return res.status(400).json({ error: 'use either page or cursor, not both' });
     }
 
-    const parsedPage = parsePositiveInt(page, 1);
-    if (Number.isNaN(parsedPage)) {
-      return res.status(400).json({ error: 'page must be a positive integer' });
+    // page_size is the contract param; limit is accepted as a legacy alias.
+    const pagination = parsePagination({
+      pageRaw: page,
+      pageSizeRaw: page_size,
+      limitRaw: limit,
+      clampPageSize: false,
+    });
+    if ('error' in pagination) {
+      return res.status(400).json({ error: pagination.error });
     }
-    if (parsedPage > MAX_PAGE) {
-      return res.status(400).json({ error: `page must not exceed ${MAX_PAGE}` });
+    const { page: parsedPage, pageSize: parsedPageSize } = pagination;
+
+    const { cursor: parsedCursor, error: cursorError } = parseCursor(cursor);
+    if (cursorError) {
+      return res.status(400).json({ error: cursorError });
     }
 
     // Date window validation
@@ -200,44 +214,99 @@ router.get('/', async (req: Request, res: Response) => {
       where.pubDate = pubDateFilter;
     }
 
-    if (searchTerm && searchTerm.length > 0) {
-      where.OR = [
-        { title: { contains: searchTerm, mode: 'insensitive' } },
-        { description: { contains: searchTerm, mode: 'insensitive' } },
-      ];
+    const searchOr: Prisma.ArticleWhereInput[] | undefined =
+      searchTerm && searchTerm.length > 0
+        ? [
+            { title: { contains: searchTerm, mode: 'insensitive' } },
+            { description: { contains: searchTerm, mode: 'insensitive' } },
+          ]
+        : undefined;
+
+    if (parsedCursor) {
+      // Keyset predicate for the (pubDate desc, id desc) order. It is combined
+      // with the search predicate as AND siblings so neither clobbers the other.
+      const keyset: Prisma.ArticleWhereInput = {
+        OR: [{ pubDate: { lt: parsedCursor.date } }, { pubDate: parsedCursor.date, id: { lt: parsedCursor.id } }],
+      };
+      where.AND = searchOr ? [{ OR: searchOr }, keyset] : [keyset];
+    } else if (searchOr) {
+      where.OR = searchOr;
     }
 
-    const queryOptions: V1QueryOptions = {
-      // Deterministic order (pubDate desc, id desc tiebreaker) so pages don't
-      // shuffle articles that share a pubDate between requests.
-      select: ARTICLE_META_SELECT,
-      orderBy: [{ pubDate: 'desc' }, { id: 'desc' }],
-      take: parsedPageSize,
-      skip: (parsedPage - 1) * parsedPageSize,
-      where,
-    };
+    const toMetaArticle = (a: {
+      id: number;
+      title: string;
+      description: string | null;
+      source: string;
+      category: string[];
+      link: string;
+      pubDate: Date;
+    }) => ({
+      id: a.id,
+      title: a.title,
+      summary: a.description,
+      source: a.source,
+      category: a.category,
+      url: a.link,
+      published_at: a.pubDate,
+    });
+
+    // Cursor mode: no count query. Fetching one extra row tells us has_more and
+    // yields the next cursor from the last *returned* row.
+    if (parsedCursor) {
+      const rows = await prisma.article.findMany({
+        select: ARTICLE_META_SELECT,
+        orderBy: [{ pubDate: 'desc' }, { id: 'desc' }],
+        take: parsedPageSize + 1,
+        where,
+      });
+      const hasMore = rows.length > parsedPageSize;
+      const dataRows = hasMore ? rows.slice(0, parsedPageSize) : rows;
+      const lastRow = dataRows[dataRows.length - 1];
+      const nextCursor = hasMore && lastRow ? encodeCursor(lastRow.pubDate, lastRow.id) : null;
+
+      res.set('Cache-Control', 'private, max-age=300');
+      return res.json({
+        data: dataRows.map(toMetaArticle),
+        meta: {
+          page: null,
+          page_size: parsedPageSize,
+          total: null,
+          has_more: hasMore,
+          next_cursor: nextCursor,
+        },
+      });
+    }
 
     const [articles, total] = await Promise.all([
-      prisma.article.findMany(queryOptions),
+      prisma.article.findMany({
+        // Deterministic order (pubDate desc, id desc tiebreaker) so pages don't
+        // shuffle articles that share a pubDate between requests.
+        select: ARTICLE_META_SELECT,
+        orderBy: [{ pubDate: 'desc' }, { id: 'desc' }],
+        take: parsedPageSize,
+        skip: pagination.skip,
+        where,
+      }),
       prisma.article.count({ where }),
     ]);
 
+    const hasMore = parsedPage * parsedPageSize < total;
+    const lastArticle = articles[articles.length - 1];
+    // Page mode can still bootstrap cursor pagination: return the keyset
+    // position of the last row so a client can switch to `cursor=` and stop
+    // paying for deep OFFSETs and exact counts.
+    const nextCursor = hasMore && lastArticle ? encodeCursor(lastArticle.pubDate, lastArticle.id) : null;
+
     res.set('Cache-Control', 'private, max-age=300');
     res.json({
-      data: articles.map((a) => ({
-        id: a.id,
-        title: a.title,
-        summary: a.description,
-        source: a.source,
-        category: a.category,
-        url: a.link,
-        published_at: a.pubDate,
-      })),
+      data: articles.map(toMetaArticle),
       meta: {
         page: parsedPage,
         page_size: parsedPageSize,
         total,
-        has_more: parsedPage * parsedPageSize < total,
+        has_more: hasMore,
+        next_cursor: nextCursor,
       },
     });
   } catch (error) {

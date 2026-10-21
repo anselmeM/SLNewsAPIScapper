@@ -3,12 +3,10 @@ import type { Prisma } from '@prisma/client';
 import { prisma } from '../db.js';
 import { runSierraLeoneVideoIngestion } from '../services/video-scraper.js';
 import { parsePositiveInt, parseSearchQuery, parseCategories } from '../utils/query.js';
+import { parsePagination } from '../utils/pagination.js';
 import logger from '../logger.js';
 
 const router = Router();
-
-const MAX_LIMIT = 100;
-const DEFAULT_LIMIT = 20;
 
 interface VideoQueryOptions {
   orderBy: Array<{ publishedAt: 'desc' } | { id: 'desc' }>;
@@ -37,6 +35,7 @@ interface VideoQueryOptions {
  *         schema:
  *           type: integer
  *           minimum: 1
+ *           maximum: 10000
  *           default: 1
  *         description: Page number (1-based)
  *       - in: query
@@ -70,22 +69,18 @@ router.get('/', async (req: Request, res: Response) => {
   try {
     const { channel, category, limit, page, q } = req.query;
 
-    const parsedLimit = parsePositiveInt(limit, DEFAULT_LIMIT);
-    if (Number.isNaN(parsedLimit)) {
-      return res.status(400).json({ error: 'limit must be a positive integer' });
-    }
-
-    const parsedPage = parsePositiveInt(page, 1);
-    if (Number.isNaN(parsedPage)) {
-      return res.status(400).json({ error: 'page must be a positive integer' });
-    }
-
     const { term: searchTerm, error: searchError } = parseSearchQuery(q);
     if (searchError) {
       return res.status(400).json({ error: searchError });
     }
 
-    const take = Math.min(parsedLimit, MAX_LIMIT);
+    // Same legacy contract as /api/news: clamp `limit`, but reject absurd pages.
+    const pagination = parsePagination({ pageRaw: page, limitRaw: limit, clampPageSize: true });
+    if ('error' in pagination) {
+      return res.status(400).json({ error: pagination.error });
+    }
+
+    const take = pagination.pageSize;
     const where: Prisma.VideoWhereInput = {};
 
     if (channel) {
@@ -110,7 +105,7 @@ router.get('/', async (req: Request, res: Response) => {
     const queryOptions: VideoQueryOptions = {
       orderBy: [{ publishedAt: 'desc' }, { id: 'desc' }],
       take,
-      skip: (parsedPage - 1) * take,
+      skip: pagination.skip,
       where,
     };
 
