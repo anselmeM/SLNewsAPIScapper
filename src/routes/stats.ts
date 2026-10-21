@@ -1,8 +1,41 @@
 import { Router, Request, Response } from 'express';
 import { prisma } from '../db.js';
 import logger from '../logger.js';
+import { positiveIntFromEnv, runtimeMetrics } from '../observability.js';
 
 const router = Router();
+
+const DEFAULT_FRESHNESS_MAX_AGE_MS = 7_200_000; // 2 hours
+
+/** Maximum acceptable ingestion lag before freshness is flagged stale (env-configurable). */
+function freshnessMaxAgeMs(): number {
+  return positiveIntFromEnv(process.env.FRESHNESS_MAX_AGE_MS, DEFAULT_FRESHNESS_MAX_AGE_MS);
+}
+
+interface Freshness {
+  latest_ingested_at: string | null;
+  lag_seconds: number | null;
+  stale: boolean;
+}
+
+/**
+ * Freshness of a dataset, based on the latest `createdAt` (ingestion time).
+ *
+ * No ingested rows => `latest_ingested_at` and `lag_seconds` are null and
+ * `stale` is true: absence of data is not evidence that the pipeline is healthy,
+ * so an empty/first-run database must page an operator instead of looking fresh.
+ */
+function freshness(latestIngestedAt: Date | null | undefined): Freshness {
+  if (!latestIngestedAt) {
+    return { latest_ingested_at: null, lag_seconds: null, stale: true };
+  }
+  const lagMs = Math.max(0, Date.now() - latestIngestedAt.getTime());
+  return {
+    latest_ingested_at: latestIngestedAt.toISOString(),
+    lag_seconds: Math.round(lagMs / 1000),
+    stale: lagMs > freshnessMaxAgeMs(),
+  };
+}
 
 /**
  * @swagger
@@ -55,6 +88,7 @@ router.get('/', async (_req: Request, res: Response) => {
     res.json({
       status: 'ok',
       timestamp: new Date().toISOString(),
+      runtime: runtimeMetrics(),
       articles: {
         total: totalArticles,
         by_source: articleSourceCounts,
@@ -66,6 +100,10 @@ router.get('/', async (_req: Request, res: Response) => {
         by_channel: videoChannelCounts,
         latest_published_at: latestVideo?.publishedAt ?? null,
         latest_ingested_at: latestVideo?.createdAt ?? null,
+      },
+      freshness: {
+        articles: freshness(latestArticle?.createdAt),
+        videos: freshness(latestVideo?.createdAt),
       },
     });
   } catch (error) {

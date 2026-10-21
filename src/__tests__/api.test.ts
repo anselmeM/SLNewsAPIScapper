@@ -58,24 +58,94 @@ afterAll(() => {
   process.env.NODE_ENV = originalNodeEnv;
 });
 
-describe('GET /api/health', () => {
-  it('returns 200 with ok status when DB is connected', async () => {
-    (prisma.$queryRaw as ReturnType<typeof vi.fn>).mockResolvedValueOnce([{ '?column?': 1 }]);
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+describe('GET /api/health (liveness)', () => {
+  it('returns 200 with liveness info and never touches the database', async () => {
+    const queryRaw = prisma.$queryRaw as ReturnType<typeof vi.fn>;
+    queryRaw.mockClear();
 
     const res = await app.get('/api/health');
+
     expect(res.status).toBe(200);
     expect(res.body.status).toBe('ok');
+    expect(res.body.service).toBe('sl-news-api');
+    expect(res.body.uptime_seconds).toEqual(expect.any(Number));
+    expect(res.body.timestamp).toBeDefined();
+    // Liveness must not depend on the database (that is /api/ready's job), so a
+    // database outage can never make the platform restart a healthy process.
+    expect(res.body.database).toBeUndefined();
+    expect(queryRaw).not.toHaveBeenCalled();
+    expect(res.headers['cache-control']).toBe('no-store');
+  });
+});
+
+describe('GET /api/ready (readiness)', () => {
+  it('returns 200 when the database is reachable', async () => {
+    (prisma.$queryRaw as ReturnType<typeof vi.fn>).mockResolvedValueOnce([{ '?column?': 1 }]);
+
+    const res = await app.get('/api/ready');
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('ready');
     expect(res.body.database).toBe('connected');
     expect(res.body.timestamp).toBeDefined();
+    expect(res.headers['cache-control']).toBe('no-store');
   });
 
-  it('returns 503 when DB is disconnected', async () => {
+  it('returns 503 when the database is unreachable', async () => {
     (prisma.$queryRaw as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('Connection failed'));
 
-    const res = await app.get('/api/health');
+    const res = await app.get('/api/ready');
+
     expect(res.status).toBe(503);
     expect(res.body.status).toBe('degraded');
     expect(res.body.database).toBe('disconnected');
+  });
+});
+
+describe('request correlation id', () => {
+  it('returns a generated X-Request-Id header', async () => {
+    const res = await app.get('/api/health');
+
+    expect(res.headers['x-request-id']).toMatch(UUID_RE);
+  });
+
+  it('echoes a valid inbound X-Request-Id', async () => {
+    const inbound = 'client-request_01.abc';
+
+    const res = await app.get('/api/health').set('X-Request-Id', inbound);
+
+    expect(res.headers['x-request-id']).toBe(inbound);
+  });
+
+  it('replaces an invalid (too short) inbound X-Request-Id', async () => {
+    const res = await app.get('/api/health').set('X-Request-Id', 'abc');
+
+    expect(res.headers['x-request-id']).toMatch(UUID_RE);
+    expect(res.headers['x-request-id']).not.toBe('abc');
+  });
+
+  it('replaces an over-long inbound X-Request-Id', async () => {
+    const res = await app.get('/api/health').set('X-Request-Id', 'a'.repeat(129));
+
+    expect(res.headers['x-request-id']).toMatch(UUID_RE);
+  });
+
+  it('includes request_id in the 404 body, matching the response header', async () => {
+    const res = await app.get('/api/nonexistent');
+
+    expect(res.status).toBe(404);
+    expect(res.body.request_id).toBe(res.headers['x-request-id']);
+  });
+
+  it('includes request_id in the error body (malformed JSON -> 400)', async () => {
+    const res = await app.post('/api/news').set('Content-Type', 'application/json').send('{"broken":');
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual(expect.objectContaining({ error: 'Bad request' }));
+    expect(res.body.request_id).toEqual(expect.any(String));
+    expect(res.body.request_id).toBe(res.headers['x-request-id']);
   });
 });
 
@@ -86,6 +156,7 @@ describe('GET /', () => {
     expect(res.body.name).toBe('Sierra Leone News API');
     expect(res.body.endpoints.news).toBeDefined();
     expect(res.body.endpoints.health).toBeDefined();
+    expect(res.body.endpoints.ready).toBe('/api/ready');
   });
 });
 
@@ -564,9 +635,15 @@ describe('Rate limiting', () => {
     expect(res.headers['ratelimit-limit']).toBeDefined();
   });
 
-  it('does not rate limit the health endpoint', async () => {
-    (prisma.$queryRaw as ReturnType<typeof vi.fn>).mockResolvedValueOnce([{ '?column?': 1 }]);
+  it('does not rate limit the liveness endpoint', async () => {
     const res = await app.get('/api/health');
+    expect(res.status).toBe(200);
+    expect(res.headers['ratelimit-limit']).toBeUndefined();
+  });
+
+  it('does not rate limit the readiness endpoint', async () => {
+    (prisma.$queryRaw as ReturnType<typeof vi.fn>).mockResolvedValueOnce([{ '?column?': 1 }]);
+    const res = await app.get('/api/ready');
     expect(res.status).toBe(200);
     expect(res.headers['ratelimit-limit']).toBeUndefined();
   });
