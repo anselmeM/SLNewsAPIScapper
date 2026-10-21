@@ -13,38 +13,54 @@ generator client {
 // be allowed to drop them.
 
 model Article {
-  id          Int      @id @default(autoincrement())
-  title       String
-  link        String   @unique
-  author      String
-  description String?
-  category    String[]
-  imageUrl    String?
-  paragraphs  String[]
-  pubDate     DateTime
-  source      String
-  createdAt   DateTime @default(now())
+  id                   Int       @id @default(autoincrement())
+  title                String
+  link                 String    @unique
+  author               String
+  description          String?
+  category             String[]
+  imageUrl             String?
+  paragraphs           String[]
+  pubDate              DateTime
+  // Date provenance: 'published' (trusted), 'clamped' (implausible date adjusted)
+  // or 'missing' (no parseable date; stored for the internal app, excluded from
+  // the sellable /v1 feed). pubDateRaw keeps the publisher's original string.
+  pubDateSource        String    @default("published")
+  pubDateRaw           String?
+  // Content provenance: 'page' | 'feed' | 'empty'; null = legacy/unknown row.
+  // contentAttempts counts failed body fetches so repair work is bounded.
+  contentSource        String?
+  contentAttempts      Int       @default(0)
+  lastContentAttemptAt DateTime?
+  source               String
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @default(now()) @updatedAt
 
   @@index([pubDate])
   @@index([source])
   @@index([createdAt])
   @@index([source, pubDate])
   @@index([pubDate, id])
+  @@index([contentSource])
   @@index([category], type: Gin)
 }
 
 model Video {
-  id           Int      @id @default(autoincrement())
-  videoId      String   @unique
-  title        String
-  url          String   @unique
-  description  String?
-  thumbnailUrl String?
-  channelId    String
-  channelTitle String
-  publishedAt  DateTime
-  category     String[]
-  createdAt    DateTime @default(now())
+  id                Int      @id @default(autoincrement())
+  videoId           String   @unique
+  title             String
+  url               String   @unique
+  description       String?
+  thumbnailUrl      String?
+  channelId         String
+  channelTitle      String
+  publishedAt       DateTime
+  // Date provenance, same semantics as Article.pubDateSource.
+  publishedAtSource String   @default("published")
+  publishedAtRaw    String?
+  category          String[]
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @default(now()) @updatedAt
 
   @@index([publishedAt])
   @@index([channelTitle])

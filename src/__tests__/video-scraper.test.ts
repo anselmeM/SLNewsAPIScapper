@@ -115,6 +115,8 @@ describe('video-scraper', () => {
         channelId: 'UC6L0-X7Vb7iK2fN5iW6gZ0Q',
         channelTitle: 'AYV News',
         publishedAt: new Date('2026-09-01T10:00:00+00:00'),
+        publishedAtSource: 'published',
+        publishedAtRaw: '2026-09-01T10:00:00+00:00',
         category: ['National', 'News'],
       });
     });
@@ -138,6 +140,68 @@ describe('video-scraper', () => {
       expect(videos[0].description).toBeNull();
       expect(videos[0].channelTitle).toBe('Fallback Channel');
       expect(videos[0].thumbnailUrl).toBe('https://i.ytimg.com/vi/abc12345678/hqdefault.jpg');
+      expect(videos[0].publishedAtSource).toBe('published');
+      expect(videos[0].publishedAtRaw).toBe('2026-09-02T12:00:00Z');
+    });
+
+    it('marks entries without a published date as missing instead of fabricating one', () => {
+      const undatedFeed = `
+        <feed xmlns:yt="http://www.youtube.com/xml/schemas/2015">
+          <title>Undated Channel</title>
+          <entry>
+            <id>yt:video:undated12345</id>
+            <title>Undated Video</title>
+          </entry>
+        </feed>
+      `;
+
+      const now = new Date('2026-10-21T12:00:00.000Z');
+      const videos = parseYouTubeAtomFeed(undatedFeed, ['News'], now);
+
+      expect(videos).toHaveLength(1);
+      expect(videos[0].publishedAtSource).toBe('missing');
+      expect(videos[0].publishedAtRaw).toBeNull();
+      expect(videos[0].publishedAt).toEqual(now);
+    });
+
+    it('marks unparseable published dates as missing with the raw value retained', () => {
+      const invalidFeed = `
+        <feed xmlns:yt="http://www.youtube.com/xml/schemas/2015">
+          <title>Invalid Channel</title>
+          <entry>
+            <id>yt:video:invalid12345</id>
+            <title>Invalid Video</title>
+            <published>not-a-date</published>
+          </entry>
+        </feed>
+      `;
+
+      const now = new Date('2026-10-21T12:00:00.000Z');
+      const videos = parseYouTubeAtomFeed(invalidFeed, ['News'], now);
+
+      expect(videos[0].publishedAtSource).toBe('missing');
+      expect(videos[0].publishedAtRaw).toBe('not-a-date');
+      expect(videos[0].publishedAt).toEqual(now);
+    });
+
+    it('clamps implausible future published dates to now', () => {
+      const futureFeed = `
+        <feed xmlns:yt="http://www.youtube.com/xml/schemas/2015">
+          <title>Future Channel</title>
+          <entry>
+            <id>yt:video:future12345</id>
+            <title>Future Video</title>
+            <published>2099-01-01T00:00:00Z</published>
+          </entry>
+        </feed>
+      `;
+
+      const now = new Date('2026-10-21T12:00:00.000Z');
+      const videos = parseYouTubeAtomFeed(futureFeed, ['News'], now);
+
+      expect(videos[0].publishedAtSource).toBe('clamped');
+      expect(videos[0].publishedAtRaw).toBe('2099-01-01T00:00:00Z');
+      expect(videos[0].publishedAt).toEqual(now);
     });
 
     it('returns empty array if feed has no entries', () => {
@@ -162,6 +226,9 @@ describe('video-scraper', () => {
         select: { videoId: true },
       });
       expect(videoMocks().upsert).toHaveBeenCalledWith(expect.objectContaining({ where: { videoId: '3f4Y2N4w1bY' } }));
+      const create = (videoMocks().upsert.mock.calls[0][0] as { create: Record<string, unknown> }).create;
+      expect(create.publishedAtSource).toBe('published');
+      expect(create.publishedAtRaw).toBe('2026-09-01T10:00:00+00:00');
     });
 
     it('skips existing videos found by the batched lookup', async () => {

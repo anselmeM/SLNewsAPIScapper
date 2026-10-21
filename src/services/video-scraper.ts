@@ -2,6 +2,7 @@ import * as cheerio from 'cheerio';
 import { prisma } from '../db.js';
 import { SIERRA_LEONE_VIDEO_SOURCES, VideoSourceConfig, getYouTubeFeedUrl } from '../config/video-sources.js';
 import { normalizeArticleUrl } from '../utils/url.js';
+import { parsePublishedDate, PubDateSource } from '../utils/dates.js';
 import { fetchWithRetry, USER_AGENT, sleep } from '../utils/http.js';
 import logger from '../logger.js';
 
@@ -14,10 +15,16 @@ export interface ParsedVideo {
   channelId: string;
   channelTitle: string;
   publishedAt: Date;
+  publishedAtSource: PubDateSource;
+  publishedAtRaw: string | null;
   category: string[];
 }
 
-export function parseYouTubeAtomFeed(xml: string, defaultCategory: string[] = []): ParsedVideo[] {
+export function parseYouTubeAtomFeed(
+  xml: string,
+  defaultCategory: string[] = [],
+  now: Date = new Date(),
+): ParsedVideo[] {
   const $ = cheerio.load(xml, { xmlMode: true });
   const feedChannelTitle = $('feed > title').text().trim() || $('author > name').first().text().trim();
   const feedChannelId = $('yt\\:channelId').first().text().trim() || '';
@@ -39,7 +46,7 @@ export function parseYouTubeAtomFeed(xml: string, defaultCategory: string[] = []
     const title = entry.find('title').text().trim() || 'Untitled Video';
     const linkHref = entry.find('link[rel="alternate"]').attr('href') || `https://www.youtube.com/watch?v=${videoId}`;
     const publishedText = entry.find('published').text().trim() || entry.find('updated').text().trim();
-    const publishedAt = publishedText ? new Date(publishedText) : new Date();
+    const published = parsePublishedDate(publishedText, now);
     const channelTitle = entry.find('author > name').text().trim() || feedChannelTitle || 'YouTube Channel';
     const channelId = entry.find('yt\\:channelId').text().trim() || feedChannelId;
 
@@ -56,7 +63,9 @@ export function parseYouTubeAtomFeed(xml: string, defaultCategory: string[] = []
       thumbnailUrl: thumbnail,
       channelId,
       channelTitle: channelTitle.slice(0, 200),
-      publishedAt: isNaN(publishedAt.getTime()) ? new Date() : publishedAt,
+      publishedAt: published.date,
+      publishedAtSource: published.source,
+      publishedAtRaw: published.raw,
       category: defaultCategory,
     });
   });
@@ -120,6 +129,8 @@ export async function syncYouTubeChannel(
             channelId: v.channelId || source.channelId,
             channelTitle: v.channelTitle || source.name,
             publishedAt: v.publishedAt,
+            publishedAtSource: v.publishedAtSource,
+            publishedAtRaw: v.publishedAtRaw,
             category: v.category,
           },
         });

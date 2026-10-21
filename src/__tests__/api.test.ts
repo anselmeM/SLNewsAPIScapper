@@ -393,6 +393,38 @@ describe('Versioned API v1', () => {
       published_at: '2025-01-01T00:00:00.000Z',
     });
     expect(res.body.meta).toEqual({ page: 1, page_size: 20, total: 1, has_more: false, next_cursor: null });
+    // Sellable feed excludes rows whose published date could not be parsed.
+    expect(mockFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ pubDateSource: { not: 'missing' } }) }),
+    );
+  });
+
+  it('excludes undated items on /v1 but keeps them on the legacy /api feed', async () => {
+    const mockFindMany = prisma.article.findMany as ReturnType<typeof vi.fn>;
+    const mockCount = prisma.article.count as ReturnType<typeof vi.fn>;
+    mockFindMany.mockClear();
+    mockCount.mockClear();
+
+    mockFindMany.mockResolvedValueOnce([]);
+    mockCount.mockResolvedValueOnce(0);
+
+    await app.get('/v1/news').set('Authorization', 'Bearer test-key-123');
+    const v1Args = mockFindMany.mock.calls[0][0];
+    expect(v1Args.where.pubDateSource).toEqual({ not: 'missing' });
+    expect(mockCount.mock.calls[0][0]).toEqual({
+      where: expect.objectContaining({ pubDateSource: { not: 'missing' } }),
+    });
+
+    mockFindMany.mockClear();
+    mockCount.mockClear();
+    mockFindMany.mockResolvedValueOnce(mockArticles);
+    mockCount.mockResolvedValueOnce(1);
+
+    const legacyRes = await app.get('/api/news').set('Authorization', 'Bearer test-key-123');
+    expect(legacyRes.status).toBe(200);
+    const apiArgs = mockFindMany.mock.calls[0][0];
+    expect(apiArgs.where).toBeUndefined();
+    expect(mockCount.mock.calls[0][0].where).toBeUndefined();
   });
 
   it('never exposes full article text (link + summary model)', async () => {
