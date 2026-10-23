@@ -37,6 +37,24 @@ export const SIERRA_LEONE_VIDEO_SOURCES: VideoSourceConfig[] = [
     note: 'State broadcaster, daily news bulletins.',
   },
   {
+    name: 'Sierraloaded TV',
+    channelId: 'UCQl4gqaPgKaBbPuiugt8AtQ',
+    category: ['Sports', 'News'],
+    note: 'Sierraloaded video desk: Leone Stars, AFCON, local sport.',
+  },
+  {
+    name: 'SLBC Sports',
+    channelId: 'UCbEJfXKDDgfje4jz7a8ZKZA',
+    category: ['Sports', 'Broadcast'],
+    note: 'State broadcaster sports desk.',
+  },
+  {
+    name: 'MegaMjr88',
+    channelId: 'UCb2LaRKrQb6kZ2SsMDHl9ag',
+    category: ['Sports', 'Archive'],
+    note: 'Leone Stars training and archive footage.',
+  },
+  {
     name: 'Vickie Remoe',
     channelId: 'UCXMnWFC9lQVYepr4yfFjhlQ',
     category: ['Culture', 'Society'],
