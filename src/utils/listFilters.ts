@@ -1,3 +1,4 @@
+import { toWatchUrl } from './videoUrl.js';
 /**
  * Pure helpers shared by the four list routes (`/api/news`, `/api/videos`,
  * `/v1/news`, `/v1/videos`).
@@ -205,7 +206,7 @@ export function toVideoMeta(video: {
     summary: video.description,
     source: video.channelTitle,
     category: video.category,
-    url: video.url,
+    url: toWatchUrl(video.url, video.videoId),
     thumbnail_url: video.thumbnailUrl,
     published_at: video.publishedAt,
   };
