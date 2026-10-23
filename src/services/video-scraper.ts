@@ -2,6 +2,7 @@ import * as cheerio from 'cheerio';
 import { prisma } from '../db.js';
 import { SIERRA_LEONE_VIDEO_SOURCES, VideoSourceConfig, getYouTubeFeedUrl } from '../config/video-sources.js';
 import { normalizeArticleUrl } from '../utils/url.js';
+import { toWatchUrl } from '../utils/videoUrl.js';
 import { parsePublishedDate, PubDateSource } from '../utils/dates.js';
 import { fetchWithRetry, USER_AGENT, sleep } from '../utils/http.js';
 import logger from '../logger.js';
@@ -58,7 +59,7 @@ export function parseYouTubeAtomFeed(
     videos.push({
       videoId,
       title: title.slice(0, 500),
-      url: normalizeArticleUrl(linkHref),
+      url: toWatchUrl(normalizeArticleUrl(linkHref), videoId),
       description: description ? description.slice(0, 2000) : null,
       thumbnailUrl: thumbnail,
       channelId,
