@@ -115,8 +115,44 @@ function paragraphsFromHtml(html: string): string[] {
 
 function firstImageFromHtml(html: string): string | null {
   const $ = cheerio.load(html);
-  const src = $('img').first().attr('src');
-  return src || null;
+  let found: string | null = null;
+  $('img').each((_, element) => {
+    if (found) return;
+    const node = $(element);
+    // WordPress/Joomla lazy-loaders often leave src as a spacer and put the
+    // real URL in a data attribute, or only in srcset.
+    for (const attribute of ['src', 'data-src', 'data-lazy-src', 'data-original']) {
+      const value = node.attr(attribute)?.trim();
+      if (value && !value.startsWith('data:')) {
+        found = value;
+        return;
+      }
+    }
+    found = pickLargestSrcset(node.attr('srcset') ?? node.attr('data-srcset'));
+  });
+  return found;
+}
+
+function pickLargestSrcset(value: string | undefined): string | null {
+  if (!value || !value.trim()) return null;
+  let best: string | null = null;
+  let bestScore = -1;
+  for (const candidate of value.split(',')) {
+    const parts = candidate.trim().split(/\s+/);
+    if (!parts[0] || parts[0].startsWith('data:')) continue;
+    let score = 1;
+    if (parts.length > 1) {
+      const number = Number.parseFloat(parts[1].replace(/[^0-9.]/g, ''));
+      if (!Number.isNaN(number)) {
+        score = parts[1].endsWith('x') ? number * 1000 : number;
+      }
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      best = parts[0];
+    }
+  }
+  return best;
 }
 
 function getFeedContentHtml(item: FeedItem): string {
