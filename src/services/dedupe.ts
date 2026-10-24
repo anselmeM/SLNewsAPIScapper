@@ -13,7 +13,7 @@ export function canonicalizeUrl(raw: string): string {
     const url = new URL(raw.trim());
     url.hash = '';
     url.hostname = url.hostname.replace(/^www\./i, '').toLowerCase();
-    for (const key of [...url.searchParams.keys()]) {
+    for (const key of Array.from(url.searchParams.keys())) {
       if (key.toLowerCase().startsWith('utm_') || TRACKING_PARAMS.has(key.toLowerCase())) {
         url.searchParams.delete(key);
       }
