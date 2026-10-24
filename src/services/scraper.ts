@@ -2,6 +2,7 @@ import Parser from 'rss-parser';
 import * as cheerio from 'cheerio';
 import { prisma } from '../db.js';
 import { SIERRA_LEONE_SOURCES } from '../config/sources.js';
+import { recordSourceFailure, recordSourceSuccess, shouldSkipSource } from './source-health.js';
 import { runSierraLeoneVideoIngestion } from './video-scraper.js';
 import { normalizeArticleUrl } from '../utils/url.js';
 import { parsePublishedDate } from '../utils/dates.js';
@@ -381,6 +382,11 @@ export async function runSierraLeoneIngestion(options: IngestionOptions = {}) {
       break;
     }
 
+    if (shouldSkipSource(source.name)) {
+      logger.warn({ source: source.name }, 'Skipping feed during backoff');
+      continue;
+    }
+
     logger.info({ source: source.name }, 'Checking feed');
 
     try {
@@ -389,6 +395,7 @@ export async function runSierraLeoneIngestion(options: IngestionOptions = {}) {
         headers: { 'User-Agent': USER_AGENT },
       });
       const feed = await parser.parseString(String(feedResponse.data));
+      recordSourceSuccess(source.name);
 
       // Normalize the whole feed first so dedupe is one batched query per source
       // instead of one findUnique per item.
@@ -506,6 +513,7 @@ export async function runSierraLeoneIngestion(options: IngestionOptions = {}) {
         }
       }
     } catch (feedError) {
+      recordSourceFailure(source.name, feedError);
       logger.error({ source: source.name, error: feedError }, 'Error reading feed');
     }
   }

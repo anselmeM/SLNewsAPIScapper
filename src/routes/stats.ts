@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { prisma } from '../db.js';
 import logger from '../logger.js';
 import { positiveIntFromEnv, runtimeMetrics } from '../observability.js';
+import { sourceHealthSnapshot } from '../services/source-health.js';
 
 const router = Router();
 
@@ -125,6 +126,21 @@ router.get('/', async (_req: Request, res: Response) => {
     logger.error(error, 'Failed to retrieve stats');
     res.status(500).json({ error: 'Failed to retrieve system statistics' });
   }
+});
+
+/**
+ * @swagger
+ * /api/stats/sources:
+ *   get:
+ *     summary: Per-source ingestion health and backoff state
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Health of each feed seen by the worker
+ */
+router.get('/sources', (_req: Request, res: Response) => {
+  res.json({ updated_at: new Date().toISOString(), sources: sourceHealthSnapshot() });
 });
 
 export default router;
