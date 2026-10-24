@@ -2,6 +2,7 @@ import Parser from 'rss-parser';
 import * as cheerio from 'cheerio';
 import { prisma } from '../db.js';
 import { SIERRA_LEONE_SOURCES } from '../config/sources.js';
+import { DedupeIndex } from './dedupe.js';
 import { recordSourceFailure, recordSourceSuccess, shouldSkipSource } from './source-health.js';
 import { runSierraLeoneVideoIngestion } from './video-scraper.js';
 import { normalizeArticleUrl } from '../utils/url.js';
@@ -404,6 +405,26 @@ export async function runSierraLeoneIngestion(options: IngestionOptions = {}) {
         if (!feedItem.link || !feedItem.title) continue;
         pendingItems.push({ item: feedItem, link: extractRealLink(feedItem.link), title: feedItem.title });
       }
+
+      // Cross-source dedupe: the same story arrives from BBC, BBC Africa and
+      // local wires with different links. The first publisher to be ingested
+      // wins; later near-identical headlines are skipped for this run.
+      const recentStories = await prisma.article.findMany({
+        where: { createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
+        select: { link: true, title: true },
+      });
+      const dedupeIndex = new DedupeIndex(recentStories);
+      const deduped: PendingItem[] = [];
+      for (const pending of pendingItems) {
+        if (dedupeIndex.isDuplicate(pending.link, pending.title)) {
+          logger.info({ source: source.name, title: pending.title }, 'Skipping duplicate story already ingested');
+          continue;
+        }
+        dedupeIndex.add(pending.link, pending.title);
+        deduped.push(pending);
+      }
+      pendingItems.length = 0;
+      pendingItems.push(...deduped);
 
       const existingByLink = new Map<string, ExistingArticleMeta>();
       if (pendingItems.length > 0) {
