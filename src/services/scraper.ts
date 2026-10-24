@@ -193,6 +193,45 @@ function resolveFeedImage(link: string, feedHtml: string): string | null {
   return src ? absolutizeUrl(src, link) : null;
 }
 
+/**
+ * Best public preview image for a page.
+ *
+ * Paywalled/JS pages frequently omit og:image but still expose the sharing
+ * image in twitter:image, link rel=image_src or JSON-LD. Those are public
+ * preview metadata, not paywalled content.
+ */
+export function firstPageImage(html: string): string | null {
+  const $ = cheerio.load(html);
+  const candidates: Array<string | undefined> = [
+    $('meta[property="og:image"]').attr('content'),
+    $('meta[name="og:image"]').attr('content'),
+    $('meta[name="twitter:image"]').attr('content'),
+    $('meta[property="twitter:image"]').attr('content'),
+    $('meta[itemprop="image"]').attr('content'),
+    $('link[rel="image_src"]').attr('href'),
+  ];
+  for (const candidate of candidates) {
+    if (candidate && !looksLikeChrome(candidate)) return candidate;
+  }
+  $('script[type="application/ld+json"]').each((_, node) => {
+    if (candidates.length > 6) return;
+    try {
+      const data = JSON.parse($(node).text());
+      const image = Array.isArray(data?.image) ? data.image[0] : data?.image;
+      const url = typeof image === 'string' ? image : image?.url;
+      if (typeof url === 'string') candidates.push(url);
+    } catch {
+      // ignore malformed JSON-LD
+    }
+  });
+  const jsonLd = candidates.slice(6).find((value) => value && !looksLikeChrome(value));
+  return jsonLd ?? null;
+}
+
+function looksLikeChrome(url: string): boolean {
+  return /(favicon|sprite|placeholder|avatar|blank\.gif|pixel\.gif)/i.test(url);
+}
+
 function contentSelectorForSource(sourceName: string): string {
   const configured = SIERRA_LEONE_SOURCES.find((source) => source.name === sourceName);
   return configured?.contentSelector ?? GENERIC_CONTENT_SELECTOR;
@@ -267,7 +306,7 @@ async function fetchArticlePage(
       if (text) paragraphs.push(text);
     });
 
-    const ogImage = $('meta[property="og:image"]').attr('content');
+    const ogImage = firstPageImage(String($.html()));
     return { paragraphs, imageUrl: ogImage ? absolutizeUrl(ogImage, url) : null };
   } catch (err) {
     logger.warn({ url, err }, 'Failed to parse article page');
@@ -283,7 +322,7 @@ async function fetchArticlePageImage(link: string): Promise<string | null> {
       headers: { 'User-Agent': USER_AGENT },
     });
     const $ = cheerio.load(data);
-    const ogImage = $('meta[property="og:image"]').attr('content');
+    const ogImage = firstPageImage(String($.html()));
     return ogImage ? absolutizeUrl(ogImage, link) : null;
   } catch {
     logger.warn({ link }, 'Failed to fetch article page for image');
