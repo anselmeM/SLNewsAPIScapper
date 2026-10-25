@@ -3,7 +3,14 @@ import * as cheerio from 'cheerio';
 import { prisma } from '../db.js';
 import { SIERRA_LEONE_SOURCES } from '../config/sources.js';
 import { DedupeIndex } from './dedupe.js';
-import { imageBackfillLimits, recordImageBackfill } from './image-metrics.js';
+import type { ImageBackfillStats } from './image-metrics.js';
+import {
+  evaluateImageBackfillAlert,
+  imageBackfillLimits,
+  imageBackfillSnapshot,
+  recordImageBackfill,
+} from './image-metrics.js';
+import { getRuntimeState, putRuntimeState } from './runtime-state.js';
 import { looksLikeChromeImage, probeAndFingerprint } from './image-pipeline.js';
 import { recordSourceFailure, recordSourceSuccess, shouldSkipSource } from './source-health.js';
 import { runSierraLeoneVideoIngestion } from './video-scraper.js';
@@ -381,13 +388,26 @@ async function backfillImages(deadlineAt: number): Promise<void> {
       revalidated += 1;
     }
   }
+  const missingRemaining = Math.max(0, missingTotal - filled);
+  const previous = await getRuntimeState<ImageBackfillStats>('image_backfill');
+  const alertState = evaluateImageBackfillAlert({ missingRemaining, previous });
   recordImageBackfill({
     filled,
     revalidated,
-    missingRemaining: Math.max(0, missingTotal - filled),
+    missingRemaining,
     limits,
     durationMs: Date.now() - startedAt,
+    stuckRuns: alertState.stuck_runs,
+    alert: alertState.alert,
+    alertReason: alertState.alert_reason,
   });
+  await putRuntimeState('image_backfill', imageBackfillSnapshot());
+  if (alertState.alert) {
+    logger.error(
+      { missingRemaining, stuckRuns: alertState.stuck_runs, reason: alertState.alert_reason },
+      'Image backfill backlog is stuck',
+    );
+  }
   logger.info({ filled, revalidated, limits }, 'Image backfill complete');
 }
 
