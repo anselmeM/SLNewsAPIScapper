@@ -5,7 +5,8 @@ import { createHash } from 'node:crypto';
 export const MIN_IMAGE_WIDTH = 300;
 export const MIN_IMAGE_HEIGHT = 200;
 
-const CHROME_PATTERN = /(favicon|sprite|placeholder|avatar|logo|icon|default[-_]|blank\.gif|pixel\.gif|spacer|1x1)([._-]|$)/i;
+const CHROME_PATTERN =
+  /(favicon|sprite|placeholder|avatar|logo|icon|default[-_]|blank\.gif|pixel\.gif|spacer|1x1)([._-]|$)/i;
 
 /** Free check: URLs that are clearly chrome, not story photography. */
 export function looksLikeChromeImage(url: string): boolean {
