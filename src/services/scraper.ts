@@ -3,6 +3,7 @@ import * as cheerio from 'cheerio';
 import { prisma } from '../db.js';
 import { SIERRA_LEONE_SOURCES } from '../config/sources.js';
 import { DedupeIndex } from './dedupe.js';
+import { imageBackfillLimits, recordImageBackfill } from './image-metrics.js';
 import { looksLikeChromeImage, probeAndFingerprint } from './image-pipeline.js';
 import { recordSourceFailure, recordSourceSuccess, shouldSkipSource } from './source-health.js';
 import { runSierraLeoneVideoIngestion } from './video-scraper.js';
@@ -338,10 +339,17 @@ async function finalizeImageUrl(candidate: string | null): Promise<string | null
 /** Bounded sweep: fill empty images and bust stale image URLs on recent rows. */
 async function backfillImages(deadlineAt: number): Promise<void> {
   if (Date.now() >= deadlineAt) return;
+  const startedAt = Date.now();
+  const missingWhere = {
+    imageUrl: null,
+    createdAt: { gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) },
+  };
+  const missingTotal = await prisma.article.count({ where: missingWhere });
+  const limits = imageBackfillLimits(missingTotal);
   const missing = await prisma.article.findMany({
-    where: { imageUrl: null, createdAt: { gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) } },
+    where: missingWhere,
     orderBy: { createdAt: 'desc' },
-    take: 15,
+    take: limits.missing,
     select: { id: true, link: true },
   });
   let filled = 0;
@@ -360,7 +368,7 @@ async function backfillImages(deadlineAt: number): Promise<void> {
       createdAt: { gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
     },
     orderBy: { createdAt: 'desc' },
-    take: 25,
+    take: limits.revalidate,
     select: { id: true, imageUrl: true },
   });
   let revalidated = 0;
@@ -373,7 +381,14 @@ async function backfillImages(deadlineAt: number): Promise<void> {
       revalidated += 1;
     }
   }
-  logger.info({ filled, revalidated }, 'Image backfill complete');
+  recordImageBackfill({
+    filled,
+    revalidated,
+    missingRemaining: Math.max(0, missingTotal - filled),
+    limits,
+    durationMs: Date.now() - startedAt,
+  });
+  logger.info({ filled, revalidated, limits }, 'Image backfill complete');
 }
 
 /** Page fetch used only for image backfill of already-stored articles. */
