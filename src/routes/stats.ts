@@ -3,6 +3,7 @@ import { prisma } from '../db.js';
 import logger from '../logger.js';
 import { positiveIntFromEnv, runtimeMetrics } from '../observability.js';
 import { sourceHealthSnapshot } from '../services/source-health.js';
+import { imageBackfillSnapshot } from '../services/image-metrics.js';
 
 const router = Router();
 
@@ -102,6 +103,7 @@ router.get('/', async (_req: Request, res: Response) => {
       status: 'ok',
       timestamp: new Date().toISOString(),
       runtime: runtimeMetrics(),
+      image_backfill: imageBackfillSnapshot(),
       articles: {
         total: totalArticles,
         by_source: articleSourceCounts,
