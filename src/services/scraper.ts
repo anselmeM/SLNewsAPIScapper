@@ -3,6 +3,7 @@ import * as cheerio from 'cheerio';
 import { prisma } from '../db.js';
 import { SIERRA_LEONE_SOURCES } from '../config/sources.js';
 import { DedupeIndex } from './dedupe.js';
+import { looksLikeChromeImage, probeAndFingerprint } from './image-pipeline.js';
 import { recordSourceFailure, recordSourceSuccess, shouldSkipSource } from './source-health.js';
 import { runSierraLeoneVideoIngestion } from './video-scraper.js';
 import { normalizeArticleUrl } from '../utils/url.js';
@@ -314,6 +315,67 @@ async function fetchArticlePage(
   }
 }
 
+/**
+ * Validates and fingerprints an image before it is stored.
+ *
+ * Cheap rejections (logos/spacers) are free; byte-level dimension checks are
+ * budgeted per run. A failed fetch keeps the original URL — a flaky CDN must
+ * not remove every picture from the feed.
+ */
+const MAX_IMAGE_VALIDATIONS_PER_RUN = 40;
+let imageValidations = 0;
+
+async function finalizeImageUrl(candidate: string | null): Promise<string | null> {
+  if (!candidate) return null;
+  if (looksLikeChromeImage(candidate)) return null;
+  if (imageValidations >= MAX_IMAGE_VALIDATIONS_PER_RUN) return candidate;
+  imageValidations += 1;
+  const probe = await probeAndFingerprint(candidate);
+  if (!probe.ok && probe.reason === 'too-small') return null;
+  return probe.url;
+}
+
+/** Bounded sweep: fill empty images and bust stale image URLs on recent rows. */
+async function backfillImages(deadlineAt: number): Promise<void> {
+  if (Date.now() >= deadlineAt) return;
+  const missing = await prisma.article.findMany({
+    where: { imageUrl: null, createdAt: { gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) } },
+    orderBy: { createdAt: 'desc' },
+    take: 15,
+    select: { id: true, link: true },
+  });
+  let filled = 0;
+  for (const article of missing) {
+    if (Date.now() >= deadlineAt) break;
+    const pageImage = await fetchArticlePageImage(article.link);
+    const final = await finalizeImageUrl(pageImage);
+    if (!final) continue;
+    await prisma.article.update({ where: { id: article.id }, data: { imageUrl: final } });
+    filled += 1;
+  }
+
+  const stale = await prisma.article.findMany({
+    where: {
+      imageUrl: { not: null },
+      createdAt: { gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
+    },
+    orderBy: { createdAt: 'desc' },
+    take: 25,
+    select: { id: true, imageUrl: true },
+  });
+  let revalidated = 0;
+  for (const article of stale) {
+    if (Date.now() >= deadlineAt) break;
+    if (!article.imageUrl || article.imageUrl.includes('v=')) continue;
+    const probe = await probeAndFingerprint(article.imageUrl);
+    if (probe.ok && probe.url !== article.imageUrl) {
+      await prisma.article.update({ where: { id: article.id }, data: { imageUrl: probe.url } });
+      revalidated += 1;
+    }
+  }
+  logger.info({ filled, revalidated }, 'Image backfill complete');
+}
+
 /** Page fetch used only for image backfill of already-stored articles. */
 async function fetchArticlePageImage(link: string): Promise<string | null> {
   try {
@@ -497,11 +559,12 @@ export async function runSierraLeoneIngestion(options: IngestionOptions = {}) {
               const feedHtml = getFeedContentHtml(item);
               const feedImage = resolveFeedImage(link, feedHtml);
               if (feedImage) {
-                updateData.imageUrl = feedImage;
+                const final = await finalizeImageUrl(feedImage);
+                if (final) updateData.imageUrl = final;
               } else if (canFetchImage()) {
                 imageFetches++;
-                const pageImage = await fetchArticlePageImage(link);
-                if (pageImage) updateData.imageUrl = pageImage;
+                const final = await finalizeImageUrl(await fetchArticlePageImage(link));
+                if (final) updateData.imageUrl = final;
               }
             }
 
@@ -540,7 +603,7 @@ export async function runSierraLeoneIngestion(options: IngestionOptions = {}) {
           const contentSource = page.paragraphs.length > 0 ? 'page' : feedParagraphs.length > 0 ? 'feed' : 'empty';
           const contentAttempts = contentSource === 'empty' ? 1 : 0;
           // Prefer the feed image (free); fall back to the page og:image.
-          const imageUrl = resolveFeedImage(link, feedHtml) ?? page.imageUrl;
+          const imageUrl = await finalizeImageUrl(resolveFeedImage(link, feedHtml) ?? page.imageUrl);
           const description = extractDescription(item);
           const published = parsePublishedDate(item.pubDate);
 
@@ -582,6 +645,7 @@ export async function runSierraLeoneIngestion(options: IngestionOptions = {}) {
 
   // Bounded sweep for rows stored without a body that this run's feeds did not see.
   await repairMissingContent(contentRepairs);
+  await backfillImages(deadlineAt);
 
   // Sitemap fallback: catch articles the RSS feed may have missed
   await scrapeTelegraphFromSitemap(deadlineAt);
