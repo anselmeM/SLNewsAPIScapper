@@ -154,13 +154,14 @@ export function resolveCorsOrigin(
   const configured = corsOrigin?.trim();
   if (configured) return { origin: configured, warning: null };
 
-  return {
-    origin: '*',
-    warning:
-      nodeEnv === 'production'
-        ? 'CORS_ORIGIN is not set: allowing every browser origin (*) in production. Set CORS_ORIGIN to restrict cross-origin access.'
-        : null,
-  };
+  if (nodeEnv === 'production') {
+    return {
+      origin: 'https://sl-news.vercel.app',
+      warning:
+        'CORS_ORIGIN is not set: defaulting to https://sl-news.vercel.app instead of a wildcard. Set CORS_ORIGIN to change it.',
+    };
+  }
+  return { origin: '*', warning: null };
 }
 
 /** Process-like target for the signal/fatal handlers (injectable in tests). */

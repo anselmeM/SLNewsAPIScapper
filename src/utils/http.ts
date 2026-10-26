@@ -1,5 +1,6 @@
 import axios, { AxiosRequestConfig, AxiosResponse } from 'axios';
 import logger from '../logger.js';
+import { UnsafeFetchUrlError, assertSafeFetchUrl } from './safe-url.js';
 
 // A browser-like UA is the compatibility default. Set SCRAPER_USER_AGENT to a
 // descriptive bot identifier without changing any of the scraping behaviour.
@@ -112,6 +113,9 @@ export async function fetchWithRetry(
   options: AxiosRequestConfig = {},
   retryOptions: number | RetryOptions = MAX_RETRIES,
 ): Promise<AxiosResponse> {
+  // Feed-controlled URLs must not reach internal addresses (sync guard: blocks
+  // loopback/private literals and local hostnames before any network I/O).
+  assertSafeFetchUrl(url);
   const { retries, deadlineMs } =
     typeof retryOptions === 'number' ? { retries: retryOptions, deadlineMs: undefined } : retryOptions;
   const maxAttempts = Math.max(1, Math.floor(retries ?? MAX_RETRIES));

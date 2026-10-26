@@ -237,16 +237,16 @@ describe('installProcessHandlers', () => {
 });
 
 describe('resolveCorsOrigin', () => {
-  it('falls back to * and warns when CORS_ORIGIN is unset in production', () => {
+  it('falls back to the site origin and warns when CORS_ORIGIN is unset in production', () => {
     expect(resolveCorsOrigin('production', undefined)).toEqual({
-      origin: '*',
+      origin: 'https://sl-news.vercel.app',
       warning: expect.stringContaining('CORS_ORIGIN'),
     });
   });
 
   it('treats a blank CORS_ORIGIN as unset', () => {
     expect(resolveCorsOrigin('production', '   ')).toEqual({
-      origin: '*',
+      origin: 'https://sl-news.vercel.app',
       warning: expect.stringContaining('CORS_ORIGIN'),
     });
   });
