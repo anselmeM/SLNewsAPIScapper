@@ -346,7 +346,7 @@ async function finalizeImageUrl(candidate: string | null): Promise<string | null
 }
 
 /** Bounded sweep: fill empty images and bust stale image URLs on recent rows. */
-async function backfillImages(deadlineAt: number): Promise<void> {
+export async function backfillImages(deadlineAt: number): Promise<void> {
   if (Date.now() >= deadlineAt) return;
   const startedAt = Date.now();
   const missingWhere = {
