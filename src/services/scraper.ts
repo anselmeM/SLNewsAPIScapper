@@ -3,7 +3,7 @@ import * as cheerio from 'cheerio';
 import { prisma } from '../db.js';
 import { SIERRA_LEONE_SOURCES } from '../config/sources.js';
 import { DedupeIndex } from './dedupe.js';
-import type { ImageBackfillStats } from './image-metrics.js';
+import type { ImageBackfillFailure, ImageBackfillStats } from './image-metrics.js';
 import {
   evaluateImageBackfillAlert,
   imageBackfillLimits,
@@ -362,11 +362,19 @@ export async function backfillImages(deadlineAt: number): Promise<void> {
     select: { id: true, link: true },
   });
   let filled = 0;
+  const failures: ImageBackfillFailure[] = [];
   for (const article of missing) {
     if (Date.now() >= deadlineAt) break;
     const pageImage = await fetchArticlePageImage(article.link);
     const final = await finalizeImageUrl(pageImage);
-    if (!final) continue;
+    if (!final) {
+      failures.push({
+        url: article.link,
+        reason: pageImage === null ? 'no-page-image' : 'probe-rejected',
+        at: Date.now(),
+      });
+      continue;
+    }
     await prisma.article.update({ where: { id: article.id }, data: { imageUrl: final } });
     filled += 1;
   }
@@ -385,7 +393,15 @@ export async function backfillImages(deadlineAt: number): Promise<void> {
     if (Date.now() >= deadlineAt) break;
     if (!article.imageUrl || article.imageUrl.includes('v=')) continue;
     const probe = await probeAndFingerprint(article.imageUrl);
-    if (probe.ok && probe.url !== article.imageUrl) {
+    if (!probe.ok) {
+      failures.push({
+        url: article.imageUrl,
+        reason: probe.reason ?? 'probe-failed',
+        at: Date.now(),
+      });
+      continue;
+    }
+    if (probe.url !== article.imageUrl) {
       await prisma.article.update({ where: { id: article.id }, data: { imageUrl: probe.url } });
       revalidated += 1;
     }
@@ -402,6 +418,7 @@ export async function backfillImages(deadlineAt: number): Promise<void> {
     stuckRuns: alertState.stuck_runs,
     alert: alertState.alert,
     alertReason: alertState.alert_reason,
+    failures,
   });
   await putRuntimeState('image_backfill', imageBackfillSnapshot());
   if (alertState.alert) {

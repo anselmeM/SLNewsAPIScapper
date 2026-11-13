@@ -12,6 +12,12 @@ export interface ImageBackfillLimits {
   reason: 'base' | 'backlog-clear' | 'env';
 }
 
+export interface ImageBackfillFailure {
+  url: string;
+  reason: string;
+  at: number;
+}
+
 export interface ImageBackfillStats {
   filled: number;
   revalidated: number;
@@ -22,6 +28,8 @@ export interface ImageBackfillStats {
   stuck_runs: number;
   alert: boolean;
   alert_reason: string | null;
+  /** Last few URLs the sweep could not resolve; cleared by acknowledgement. */
+  failures: ImageBackfillFailure[];
 }
 
 const BASE = { missing: 15, revalidate: 25 } as const;
@@ -37,6 +45,7 @@ let stats: ImageBackfillStats = {
   stuck_runs: 0,
   alert: false,
   alert_reason: null,
+  failures: [],
 };
 
 /** Bounded-batch sizes for this run; the backlog total decides the mode. */
@@ -97,6 +106,7 @@ export function recordImageBackfill(input: {
   stuckRuns?: number;
   alert?: boolean;
   alertReason?: string | null;
+  failures?: ImageBackfillFailure[];
 }): void {
   stats = {
     filled: input.filled,
@@ -108,9 +118,26 @@ export function recordImageBackfill(input: {
     stuck_runs: input.stuckRuns ?? 0,
     alert: input.alert ?? false,
     alert_reason: input.alertReason ?? null,
+    failures: (input.failures ?? []).slice(0, 20),
   };
 }
 
+/**
+ * Clears the alert/stuck counter and the dead-letter list after an operator has
+ * investigated. The next two runs can alert again if the backlog is genuinely
+ * stuck, so acknowledgement is not a permanent mute.
+ */
+export function acknowledgeImageBackfill(): ImageBackfillStats {
+  stats = {
+    ...stats,
+    stuck_runs: 0,
+    alert: false,
+    alert_reason: null,
+    failures: [],
+  };
+  return imageBackfillSnapshot();
+}
+
 export function imageBackfillSnapshot(): ImageBackfillStats {
-  return { ...stats, limits: { ...stats.limits } };
+  return { ...stats, limits: { ...stats.limits }, failures: [...stats.failures] };
 }
