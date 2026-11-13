@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, beforeAll } from 'vitest';
 import axios from 'axios';
 
 vi.mock('axios', () => ({ default: { get: vi.fn() } }));
@@ -24,19 +24,34 @@ vi.mock('../logger.js', () => ({
   default: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), trace: vi.fn(), fatal: vi.fn() },
 }));
 
-const { prisma } = await import('../db.js');
-const { probeAndFingerprint } = await import('../services/image-pipeline.js');
-const { getRuntimeState } = await import('../services/runtime-state.js');
-const logger = (await import('../logger.js')).default;
-const { backfillImages } = await import('../services/scraper.js');
-
-const mocks = {
-  count: prisma.article.count as ReturnType<typeof vi.fn>,
-  findMany: prisma.article.findMany as ReturnType<typeof vi.fn>,
-  update: prisma.article.update as ReturnType<typeof vi.fn>,
-  probe: probeAndFingerprint as ReturnType<typeof vi.fn>,
-  previous: getRuntimeState as ReturnType<typeof vi.fn>,
+let backfillImages: (deadlineAt: number) => Promise<void>;
+let logger: { error: ReturnType<typeof vi.fn> };
+const mocks: {
+  count: ReturnType<typeof vi.fn>;
+  findMany: ReturnType<typeof vi.fn>;
+  update: ReturnType<typeof vi.fn>;
+  probe: ReturnType<typeof vi.fn>;
+  previous: ReturnType<typeof vi.fn>;
+} = {
+  count: vi.fn(),
+  findMany: vi.fn(),
+  update: vi.fn(),
+  probe: vi.fn(),
+  previous: vi.fn(),
 };
+
+beforeAll(async () => {
+  const { prisma } = await import('../db.js');
+  const { probeAndFingerprint } = await import('../services/image-pipeline.js');
+  const { getRuntimeState } = await import('../services/runtime-state.js');
+  logger = (await import('../logger.js')).default as unknown as typeof logger;
+  backfillImages = (await import('../services/scraper.js')).backfillImages;
+  mocks.count = prisma.article.count as ReturnType<typeof vi.fn>;
+  mocks.findMany = prisma.article.findMany as ReturnType<typeof vi.fn>;
+  mocks.update = prisma.article.update as ReturnType<typeof vi.fn>;
+  mocks.probe = probeAndFingerprint as ReturnType<typeof vi.fn>;
+  mocks.previous = getRuntimeState as ReturnType<typeof vi.fn>;
+});
 
 beforeEach(() => {
   vi.clearAllMocks();
