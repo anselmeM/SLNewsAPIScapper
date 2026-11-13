@@ -1,4 +1,4 @@
-﻿import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import axios from 'axios';
 
 vi.mock('axios', () => ({ default: { get: vi.fn() } }));
@@ -97,7 +97,7 @@ describe('backfillImages', () => {
 
     await backfillImages(Date.now() + 60_000);
 
-    expect(logger.error).toHaveBeenCalledWith(
+    expect((logger as unknown as { error: ReturnType<typeof vi.fn> }).error).toHaveBeenCalledWith(
       expect.objectContaining({ missingRemaining: 100 }),
       'Image backfill backlog is stuck',
     );

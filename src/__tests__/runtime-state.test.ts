@@ -15,11 +15,12 @@ describe('runtime state', () => {
   it('creates the table once and upserts snapshots', async () => {
     const { prisma } = await import('../db.js');
     const { putRuntimeState } = await import('../services/runtime-state.js');
+    const execute = prisma.$executeRawUnsafe as unknown as ReturnType<typeof vi.fn>;
     await putRuntimeState('image_backfill', { filled: 1 });
     await putRuntimeState('image_backfill', { filled: 2 });
-    expect(prisma.$executeRawUnsafe).toHaveBeenCalledTimes(3);
-    expect(prisma.$executeRawUnsafe.mock.calls[0][0]).toContain('CREATE TABLE IF NOT EXISTS runtime_state');
-    expect(prisma.$executeRawUnsafe.mock.calls[2].slice(1)).toEqual(['image_backfill', '{"filled":2}']);
+    expect(execute).toHaveBeenCalledTimes(3);
+    expect(execute.mock.calls[0][0]).toContain('CREATE TABLE IF NOT EXISTS runtime_state');
+    expect(execute.mock.calls[2].slice(1)).toEqual(['image_backfill', '{"filled":2}']);
   });
 
   it('reads a snapshot and tolerates database errors', async () => {
