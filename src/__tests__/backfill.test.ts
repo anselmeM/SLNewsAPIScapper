@@ -100,6 +100,27 @@ describe('backfillImages', () => {
     });
   });
 
+  it('records a dead-letter entry when the page image cannot be resolved', async () => {
+    mocks.count.mockResolvedValue(1);
+    mocks.findMany.mockImplementation((args: { where: { imageUrl?: unknown } }) => {
+      if (args.where.imageUrl === null) {
+        return Promise.resolve([{ id: 3, link: 'https://publisher.test/broken' }]);
+      }
+      return Promise.resolve([]);
+    });
+    (axios.get as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('timeout'));
+
+    await backfillImages(Date.now() + 60_000);
+
+    const { imageBackfillSnapshot } = await import('../services/image-metrics.js');
+    expect(imageBackfillSnapshot().failures).toEqual([
+      expect.objectContaining({
+        url: 'https://publisher.test/broken',
+        reason: 'no-page-image',
+      }),
+    ]);
+  });
+
   it('does no work when the deadline has passed', async () => {
     await backfillImages(Date.now() - 1);
     expect(mocks.count).not.toHaveBeenCalled();

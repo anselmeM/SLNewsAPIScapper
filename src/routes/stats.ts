@@ -3,8 +3,8 @@ import { prisma } from '../db.js';
 import logger from '../logger.js';
 import { positiveIntFromEnv, runtimeMetrics } from '../observability.js';
 import { sourceHealthSnapshot } from '../services/source-health.js';
-import { imageBackfillSnapshot } from '../services/image-metrics.js';
-import { getRuntimeState } from '../services/runtime-state.js';
+import { acknowledgeImageBackfill, imageBackfillSnapshot } from '../services/image-metrics.js';
+import { getRuntimeState, putRuntimeState } from '../services/runtime-state.js';
 
 const router = Router();
 
@@ -144,6 +144,22 @@ router.get('/', async (_req: Request, res: Response) => {
  */
 router.get('/sources', (_req: Request, res: Response) => {
   res.json({ updated_at: new Date().toISOString(), sources: sourceHealthSnapshot() });
+});
+
+/**
+ * Acknowledge the image-backfill alert: clears the stuck counter and the
+ * dead-letter list, then persists the reset so the next worker run does not
+ * resurrect the old alert from runtime_state.
+ */
+router.post('/image-backfill/ack', async (_req: Request, res: Response) => {
+  try {
+    const snapshot = acknowledgeImageBackfill();
+    await putRuntimeState('image_backfill', snapshot);
+    res.json({ image_backfill: snapshot });
+  } catch (error) {
+    logger.error(error, 'Failed to acknowledge image backfill alert');
+    res.status(500).json({ error: 'Failed to acknowledge image backfill alert' });
+  }
 });
 
 export default router;
