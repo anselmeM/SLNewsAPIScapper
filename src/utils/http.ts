@@ -1,6 +1,6 @@
 import axios, { AxiosRequestConfig, AxiosResponse } from 'axios';
 import logger from '../logger.js';
-import { UnsafeFetchUrlError, assertSafeFetchUrl } from './safe-url.js';
+import { assertSafeFetchUrl } from './safe-url.js';
 
 // A browser-like UA is the compatibility default. Set SCRAPER_USER_AGENT to a
 // descriptive bot identifier without changing any of the scraping behaviour.

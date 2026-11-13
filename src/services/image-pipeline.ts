@@ -22,7 +22,10 @@ export function fingerprintFromHeaders(headers: Record<string, unknown>): string
   const etag = String(headers.etag ?? '').trim();
   const lastModified = String(headers['last-modified'] ?? '').trim();
   const length = String(headers['content-length'] ?? '').trim();
-  const material = etag || `${lastModified}:${length}`;
+  // `:` alone is not a validator; without any header return null so the URL is
+  // left untouched rather than receiving the same bogus fingerprint for every
+  // image.
+  const material = etag || (lastModified || length ? `${lastModified}:${length}` : '');
   if (!material) return null;
   return createHash('sha1').update(material).digest('hex').slice(0, 12);
 }

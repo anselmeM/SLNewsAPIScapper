@@ -1,11 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import axios from 'axios';
 import logger from '../logger.js';
+import { __resetSourceHealth } from '../services/source-health.js';
 
 vi.mock('../db.js', () => ({
   prisma: {
     article: {
       findMany: vi.fn().mockResolvedValue([]),
+      count: vi.fn().mockResolvedValue(0),
       findUnique: vi.fn(),
       update: vi.fn().mockResolvedValue({ id: 1 }),
       upsert: vi.fn().mockResolvedValue({ id: 1 }),
@@ -14,6 +16,8 @@ vi.mock('../db.js', () => ({
       findMany: vi.fn().mockResolvedValue([]),
       upsert: vi.fn().mockResolvedValue({ id: 1 }),
     },
+    $executeRawUnsafe: vi.fn().mockResolvedValue(0),
+    $queryRawUnsafe: vi.fn().mockResolvedValue([]),
   },
 }));
 
@@ -190,6 +194,7 @@ async function articleMocks() {
 
 beforeEach(async () => {
   vi.restoreAllMocks();
+  __resetSourceHealth();
   (axios.get as Mock).mockReset();
 
   const mocks = await articleMocks();
@@ -222,7 +227,7 @@ describe('runSierraLeoneIngestion', () => {
     findMany.mockImplementation(findManyRouting({ rows: (links) => (links.includes(link) ? [row] : []) }));
 
     const { runSierraLeoneIngestion } = await import('../services/scraper.js');
-    await runSierraLeoneIngestion();
+    await runSierraLeoneIngestion({ skipImageBackfill: true });
 
     // Batched dedupe: one findMany for the source, no per-item findUnique.
     expect(findMany).toHaveBeenCalledWith({ where: { link: { in: [link] } }, select: EXISTING_ARTICLE_SELECT });
@@ -271,7 +276,7 @@ describe('runSierraLeoneIngestion', () => {
     findMany.mockImplementation(findManyRouting({ rows: (links) => (links.includes(link) ? [row] : []) }));
 
     const { runSierraLeoneIngestion } = await import('../services/scraper.js');
-    await runSierraLeoneIngestion();
+    await runSierraLeoneIngestion({ skipImageBackfill: true });
 
     expect(update).not.toHaveBeenCalled();
     expect(upsert).not.toHaveBeenCalled();
@@ -285,7 +290,56 @@ describe('runSierraLeoneIngestion', () => {
       content: '<p>Feed content without any images.</p>',
       categories: ['News'],
     }));
-    const feeds = Object.fromEntries(FEED_URLS.map((url) => [url, items]));
+    const feeds = Object.fromEntries(
+      FEED_URLS.map((url, feedIndex) => [
+        url,
+        items.map((item, itemIndex) => {
+          const words = [
+            'alpha',
+            'bravo',
+            'charlie',
+            'delta',
+            'echo',
+            'foxtrot',
+            'golf',
+            'hotel',
+            'india',
+            'juliet',
+            'kilo',
+            'lima',
+            'mike',
+            'november',
+            'oscar',
+            'papa',
+            'quebec',
+            'romeo',
+            'sierra',
+            'tango',
+            'uniform',
+            'victor',
+            'whiskey',
+            'xray',
+            'yankee',
+            'zulu',
+            'amber',
+            'bronze',
+            'copper',
+            'denim',
+            'emerald',
+            'flint',
+            'garnet',
+            'hazel',
+            'ivory',
+            'jade',
+          ];
+          return {
+            ...item,
+            link: `${ARTICLE_PREFIX}${feedIndex}-${itemIndex}`,
+            title: `${words[feedIndex * 12 + itemIndex]} bulletin`,
+          };
+        }),
+      ]),
+    );
 
     mockHttp((url) => {
       if (url.startsWith(ARTICLE_PREFIX)) return '<html><head></head><body></body></html>';
@@ -310,7 +364,7 @@ describe('runSierraLeoneIngestion', () => {
     );
 
     const { runSierraLeoneIngestion } = await import('../services/scraper.js');
-    await runSierraLeoneIngestion();
+    await runSierraLeoneIngestion({ skipImageBackfill: true });
 
     // 36 candidates in one run (12 items x 3 feeds), but only 10 page fetches.
     expect(articlePageCalls()).toHaveLength(10);
@@ -360,7 +414,7 @@ describe('runSierraLeoneIngestion', () => {
     const { upsert } = await articleMocks();
 
     const { runSierraLeoneIngestion } = await import('../services/scraper.js');
-    await runSierraLeoneIngestion();
+    await runSierraLeoneIngestion({ skipImageBackfill: true });
 
     expect(upsert).toHaveBeenCalledTimes(2);
     const creates = upsert.mock.calls.map(([args]) => (args as { create: Record<string, unknown> }).create);
@@ -398,7 +452,7 @@ describe('runSierraLeoneIngestion', () => {
 
     const { upsert } = await articleMocks();
     const { runSierraLeoneIngestion } = await import('../services/scraper.js');
-    await expect(runSierraLeoneIngestion()).resolves.toBeUndefined();
+    await expect(runSierraLeoneIngestion({ skipImageBackfill: true })).resolves.toBeUndefined();
 
     expect(upsert).toHaveBeenCalledTimes(1);
     const create = (upsert.mock.calls[0][0] as { create: Record<string, unknown> }).create;
@@ -418,7 +472,7 @@ describe('runSierraLeoneIngestion', () => {
 
     const { upsert } = await articleMocks();
     const { runSierraLeoneIngestion } = await import('../services/scraper.js');
-    await runSierraLeoneIngestion();
+    await runSierraLeoneIngestion({ skipImageBackfill: true });
 
     const create = (upsert.mock.calls[0][0] as { create: Record<string, unknown> }).create;
     expect(create.pubDateSource).toBe('missing');
@@ -437,7 +491,7 @@ describe('runSierraLeoneIngestion', () => {
 
     const { upsert } = await articleMocks();
     const { runSierraLeoneIngestion } = await import('../services/scraper.js');
-    await runSierraLeoneIngestion();
+    await runSierraLeoneIngestion({ skipImageBackfill: true });
 
     const create = (upsert.mock.calls[0][0] as { create: Record<string, unknown> }).create;
     expect(create.pubDateSource).toBe('clamped');
@@ -466,7 +520,7 @@ describe('runSierraLeoneIngestion', () => {
     findMany.mockImplementation(findManyRouting({ rows: (links) => (links.includes(link) ? [row] : []) }));
 
     const { runSierraLeoneIngestion } = await import('../services/scraper.js');
-    await runSierraLeoneIngestion();
+    await runSierraLeoneIngestion({ skipImageBackfill: true });
 
     // The feed "summary" body is not used; the page body is stored and attempts reset.
     expect(upsert).not.toHaveBeenCalled();
@@ -499,7 +553,7 @@ describe('runSierraLeoneIngestion', () => {
     findMany.mockImplementation(findManyRouting({ repairCandidates: candidates }));
 
     const { runSierraLeoneIngestion } = await import('../services/scraper.js');
-    await runSierraLeoneIngestion();
+    await runSierraLeoneIngestion({ skipImageBackfill: true });
 
     expect(findMany).toHaveBeenCalledWith(REPAIR_SWEEP_QUERY);
     expect(httpCalls().filter((url) => url.startsWith(REPAIR_PREFIX))).toHaveLength(5);
@@ -536,7 +590,7 @@ describe('runSierraLeoneIngestion', () => {
     findMany.mockImplementation(findManyRouting({ repairCandidates: [candidate] }));
 
     const { runSierraLeoneIngestion } = await import('../services/scraper.js');
-    await runSierraLeoneIngestion();
+    await runSierraLeoneIngestion({ skipImageBackfill: true });
 
     expect(update).toHaveBeenCalledWith({
       where: { id: 77 },
@@ -566,7 +620,7 @@ describe('runSierraLeoneIngestion', () => {
     findMany.mockImplementation(findManyRouting({}));
 
     const { runSierraLeoneIngestion } = await import('../services/scraper.js');
-    await runSierraLeoneIngestion();
+    await runSierraLeoneIngestion({ skipImageBackfill: true });
 
     expect(upsert).toHaveBeenCalledTimes(1);
     const create = (upsert.mock.calls[0][0] as { create: Record<string, unknown> }).create;
@@ -596,7 +650,7 @@ describe('runSierraLeoneIngestion', () => {
     findMany.mockImplementation(findManyRouting({ knownLinks: known }));
 
     const { runSierraLeoneIngestion } = await import('../services/scraper.js');
-    await runSierraLeoneIngestion();
+    await runSierraLeoneIngestion({ skipImageBackfill: true });
 
     // Pages 1 and 2 are fully known -> stop before touching page 3.
     expect(httpCalls().filter((url) => url === TELEGRAPH_SITEMAP_PAGE(1))).toHaveLength(1);
@@ -612,7 +666,7 @@ describe('runSierraLeoneIngestion', () => {
     findMany.mockImplementation(findManyRouting({}));
 
     const { runSierraLeoneIngestion } = await import('../services/scraper.js');
-    await runSierraLeoneIngestion();
+    await runSierraLeoneIngestion({ skipImageBackfill: true });
 
     expect(httpCalls().filter((url) => url === TELEGRAPH_SITEMAP_PAGE(1))).toHaveLength(1);
     expect(httpCalls()).not.toContain(TELEGRAPH_SITEMAP_PAGE(2));
@@ -634,7 +688,7 @@ describe('runSierraLeoneIngestion', () => {
     findMany.mockImplementation(findManyRouting({}));
 
     const { runSierraLeoneIngestion } = await import('../services/scraper.js');
-    await runSierraLeoneIngestion();
+    await runSierraLeoneIngestion({ skipImageBackfill: true });
 
     expect(httpCalls().filter((url) => url === TELEGRAPH_SITEMAP_PAGE(1))).toHaveLength(3); // retried
     expect(httpCalls()).not.toContain(TELEGRAPH_SITEMAP_PAGE(2));
@@ -649,7 +703,7 @@ describe('runSierraLeoneIngestion', () => {
 
     const { findMany, findUnique, videoFindMany } = await articleMocks();
     const { runSierraLeoneIngestion } = await import('../services/scraper.js');
-    await runSierraLeoneIngestion({ deadlineAt: Date.now() - 1000 });
+    await runSierraLeoneIngestion({ deadlineAt: Date.now() - 1000, skipImageBackfill: true });
 
     expect(axios.get).not.toHaveBeenCalled();
     expect(findMany).not.toHaveBeenCalled();
@@ -672,7 +726,7 @@ describe('runSierraLeoneIngestion', () => {
 
     const { upsert } = await articleMocks();
     const { runSierraLeoneIngestion } = await import('../services/scraper.js');
-    await runSierraLeoneIngestion();
+    await runSierraLeoneIngestion({ skipImageBackfill: true });
 
     expect(feedAttempts).toBe(2);
     expect(upsert).toHaveBeenCalledTimes(1);
@@ -683,7 +737,7 @@ describe('runSierraLeoneIngestion', () => {
 
     const { upsert } = await articleMocks();
     const { runSierraLeoneIngestion } = await import('../services/scraper.js');
-    await expect(runSierraLeoneIngestion()).resolves.toBeUndefined();
+    await expect(runSierraLeoneIngestion({ skipImageBackfill: true })).resolves.toBeUndefined();
     expect(upsert).not.toHaveBeenCalled();
   });
 
@@ -700,7 +754,7 @@ describe('runSierraLeoneIngestion', () => {
 
     const { upsert } = await articleMocks();
     const { runSierraLeoneIngestion } = await import('../services/scraper.js');
-    await expect(runSierraLeoneIngestion()).resolves.not.toThrow();
+    await expect(runSierraLeoneIngestion({ skipImageBackfill: true })).resolves.not.toThrow();
 
     // Page fetch failed but the feed-HTML fallback still produces an article.
     expect(upsert).toHaveBeenCalledTimes(1);
