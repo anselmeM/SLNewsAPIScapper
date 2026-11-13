@@ -1,4 +1,4 @@
-﻿import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('../db.js', () => ({
   prisma: {
@@ -25,10 +25,11 @@ describe('runtime state', () => {
   it('reads a snapshot and tolerates database errors', async () => {
     const { prisma } = await import('../db.js');
     const { getRuntimeState } = await import('../services/runtime-state.js');
-    prisma.$queryRawUnsafe.mockResolvedValue([{ value: { filled: 3 } }]);
+    const query = prisma.$queryRawUnsafe as unknown as ReturnType<typeof vi.fn>;
+    query.mockResolvedValue([{ value: { filled: 3 } }]);
     await expect(getRuntimeState('image_backfill')).resolves.toEqual({ filled: 3 });
 
-    prisma.$queryRawUnsafe.mockRejectedValue(new Error('down'));
+    query.mockRejectedValue(new Error('down'));
     await expect(getRuntimeState('image_backfill')).resolves.toBeNull();
   });
 });
