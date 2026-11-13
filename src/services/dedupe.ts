@@ -56,8 +56,8 @@ export interface ExistingStory {
 }
 
 export class DedupeIndex {
-  private readonly links = new Set<string>();
-  private readonly titles: string[] = [];
+  private links = new Set<string>();
+  private titles: string[] = [];
 
   constructor(existing: ExistingStory[] = []) {
     for (const story of existing) this.add(story.link, story.title);
@@ -66,6 +66,14 @@ export class DedupeIndex {
   add(link: string, title: string): void {
     this.links.add(canonicalizeUrl(link));
     this.titles.push(title);
+  }
+
+  /** Copy for a single source pass: reads prior sources, not its own items. */
+  snapshot(): DedupeIndex {
+    const copy = new DedupeIndex();
+    copy.links = new Set(this.links);
+    copy.titles = [...this.titles];
+    return copy;
   }
 
   isDuplicate(link: string, title: string, threshold = 0.85): boolean {

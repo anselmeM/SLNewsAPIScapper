@@ -53,6 +53,8 @@ function readPositiveIntEnv(name: string, fallback: number): number {
 export interface IngestionOptions {
   /** Absolute epoch-ms timestamp after which no new source/page/channel starts. */
   deadlineAt?: number;
+  /** Test seam: skip the post-ingestion image sweep so mocks stay focused. */
+  skipImageBackfill?: boolean;
 }
 
 interface FeedItem {
@@ -502,6 +504,10 @@ export async function runSierraLeoneIngestion(options: IngestionOptions = {}) {
   const configuredDeadlineMs = readPositiveIntEnv('INGESTION_DEADLINE_MS', DEFAULT_INGESTION_DEADLINE_MS);
   const deadlineAt = options.deadlineAt ?? Date.now() + configuredDeadlineMs;
   const deadlineReached = () => Date.now() >= deadlineAt;
+  if (deadlineReached()) {
+    logger.warn({ deadlineAt }, 'Ingestion deadline already reached; skipping run');
+    return;
+  }
 
   // Budget for article-page image fetches during metadata backfill. Feed HTML
   // image extraction is free and stays uncapped; only the extra page fetch is
@@ -512,6 +518,15 @@ export async function runSierraLeoneIngestion(options: IngestionOptions = {}) {
     imageFetches < MAX_IMAGE_FETCHES_PER_RUN && Date.now() - runStartedAt < BACKFILL_BUDGET_MS;
 
   const contentRepairs: ContentRepairContext = { deadlineAt, startedAt: Date.now(), repairs: 0 };
+
+  // One index for the whole run. Items accepted from a source are added after
+  // that source is processed, so near-identical headlines in the SAME feed are
+  // preserved while the next publisher still loses to the first.
+  const recentStories = await prisma.article.findMany({
+    where: { createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
+    select: { link: true, title: true },
+  });
+  const dedupeIndex = new DedupeIndex(recentStories);
 
   for (const source of SIERRA_LEONE_SOURCES) {
     if (deadlineReached()) {
@@ -542,22 +557,21 @@ export async function runSierraLeoneIngestion(options: IngestionOptions = {}) {
         pendingItems.push({ item: feedItem, link: extractRealLink(feedItem.link), title: feedItem.title });
       }
 
-      // Cross-source dedupe: the same story arrives from BBC, BBC Africa and
-      // local wires with different links. The first publisher to be ingested
-      // wins; later near-identical headlines are skipped for this run.
-      const recentStories = await prisma.article.findMany({
-        where: { createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
-        select: { link: true, title: true },
-      });
-      const dedupeIndex = new DedupeIndex(recentStories);
+      // Cross-source dedupe: compare against the DB and PRIOR sources only.
+      // Comparing inside one feed would suppress legitimate near-identical
+      // headlines from the same publisher, so the index is snapshotted first
+      // and accepted items are added after the pass.
+      const sourceIndex = dedupeIndex.snapshot();
       const deduped: PendingItem[] = [];
       for (const pending of pendingItems) {
-        if (dedupeIndex.isDuplicate(pending.link, pending.title)) {
+        if (sourceIndex.isDuplicate(pending.link, pending.title)) {
           logger.info({ source: source.name, title: pending.title }, 'Skipping duplicate story already ingested');
           continue;
         }
-        dedupeIndex.add(pending.link, pending.title);
         deduped.push(pending);
+      }
+      for (const pending of deduped) {
+        dedupeIndex.add(pending.link, pending.title);
       }
       pendingItems.length = 0;
       pendingItems.push(...deduped);
@@ -680,7 +694,7 @@ export async function runSierraLeoneIngestion(options: IngestionOptions = {}) {
 
   // Bounded sweep for rows stored without a body that this run's feeds did not see.
   await repairMissingContent(contentRepairs);
-  await backfillImages(deadlineAt);
+  if (!options.skipImageBackfill) await backfillImages(deadlineAt);
 
   // Sitemap fallback: catch articles the RSS feed may have missed
   await scrapeTelegraphFromSitemap(deadlineAt);
