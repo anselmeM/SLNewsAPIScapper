@@ -1,5 +1,4 @@
 import 'dotenv/config';
-import crypto from 'crypto';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -35,17 +34,14 @@ function parseTrustProxyHops(raw: string | undefined): number {
 }
 
 /**
- * Rate-limit key: the hashed bearer token when the caller authenticates, so
- * each credential gets its own budget (and API keys are never stored or logged
- * raw); otherwise the client IP, normalised through express-rate-limit's
- * `ipKeyGenerator` so IPv6 clients cannot cycle addresses inside their /64 to
- * dodge the limiter.
+ * Rate-limit key: the client IP, normalised through express-rate-limit's
+ * `ipKeyGenerator` so IPv6 clients cannot cycle addresses inside their /64.
+ *
+ * Do NOT key on an arbitrary Authorization header: the limiter runs before
+ * authentication, so an attacker could rotate invented bearer values and get a
+ * fresh budget per request. Per-credential quotas belong after authentication.
  */
 function rateLimitKey(req: express.Request): string {
-  const authorization = req.headers.authorization;
-  if (authorization) {
-    return crypto.createHash('sha256').update(authorization, 'utf8').digest('hex');
-  }
   return ipKeyGenerator(req.ip ?? '');
 }
 

@@ -88,6 +88,27 @@ describe('rate limiting behind the proxy', () => {
     expect(secondB.status).toBe(401);
   });
 
+  it('does not let rotating Authorization values bypass the per-IP budget', async () => {
+    const client = '203.0.113.30';
+    const first = await app
+      .get('/api/news')
+      .set('X-Forwarded-For', client)
+      .set('Authorization', 'Bearer invented-token-1');
+    const second = await app
+      .get('/api/news')
+      .set('X-Forwarded-For', client)
+      .set('Authorization', 'Bearer invented-token-2');
+    const third = await app
+      .get('/api/news')
+      .set('X-Forwarded-For', client)
+      .set('Authorization', 'Bearer invented-token-3');
+
+    // The limiter runs before auth: invented tokens must not mint fresh buckets.
+    expect(first.status).toBe(401);
+    expect(second.status).toBe(401);
+    expect(third.status).toBe(429);
+  });
+
   it('never throttles the health endpoint', async () => {
     (prisma.$queryRaw as ReturnType<typeof vi.fn>).mockResolvedValueOnce([{ '?column?': 1 }]);
 
