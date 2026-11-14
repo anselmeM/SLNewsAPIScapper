@@ -69,7 +69,7 @@
     "@types/supertest": "^7.2.1",
     "@types/swagger-jsdoc": "^6.0.4",
     "@types/swagger-ui-express": "^4.1.8",
-    "@vitest/coverage-v8": "^4.1.11",
+    "@vitest/coverage-v8": "^4.1.12",
     "husky": "^9.1.7",
     "lint-staged": "^17.3.0",
     "oxlint": "^1.89.0",
@@ -79,7 +79,7 @@
     "supertest": "^7.2.2",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.12"
   },
   "lint-staged": {
     "*.{ts,js,mjs,cjs}": "prettier --write",
@@ -91,6 +91,7 @@
     "js-yaml": "^4.3.2",
     "mysql2": "^3.24.3",
     "nanoid": "^3.3.18",
-    "qs": "^6.16.0"
+    "qs": "^6.16.0",
+    "glob": "^14.0.3"
   }
 }
