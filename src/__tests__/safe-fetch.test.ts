@@ -6,10 +6,41 @@ import { UnsafeFetchUrlError } from '../utils/safe-url.js';
 function lookupHost(
   lookup: ReturnType<typeof createSafeLookup>,
   hostname: string,
+  options: dns.LookupOptions = { family: 0 },
 ): Promise<{ address?: string; family?: number; error?: Error }> {
   return new Promise((resolve) => {
-    lookup(hostname, { family: 0 }, (error, address, family) => {
-      resolve({ address, family, error: error ?? undefined });
+    lookup(hostname, options, (error, address, family) => {
+      resolve({
+        address: typeof address === 'string' ? address : undefined,
+        family,
+        error: error ?? undefined,
+      });
+    });
+  });
+}
+
+function lookupHostAll(
+  lookup: ReturnType<typeof createSafeLookup>,
+  hostname: string,
+): Promise<{ addresses?: dns.LookupAddress[]; error?: Error }> {
+  return new Promise((resolve) => {
+    lookup(hostname, { all: true, family: 0 }, (error, address) => {
+      resolve({
+        addresses: Array.isArray(address) ? address : undefined,
+        error: error ?? undefined,
+      });
+    });
+  });
+}
+
+function lookupAllAddresses(
+  lookup: ReturnType<typeof createSafeLookup>,
+  hostname: string,
+  family: 4 | 6,
+): Promise<dns.LookupAddress[] | undefined> {
+  return new Promise((resolve) => {
+    lookup(hostname, { all: true, family }, (_error, address) => {
+      resolve(Array.isArray(address) ? address : undefined);
     });
   });
 }
@@ -30,6 +61,54 @@ describe('safe DNS lookup', () => {
       all: true,
       verbatim: true,
     });
+  });
+
+  it('returns the validated address array when Node requests all answers', async () => {
+    const resolver = vi.fn(async () => [
+      { address: '93.184.216.34', family: 4 },
+      { address: '2606:4700:4700::1111', family: 6 },
+    ]) as unknown as typeof dns.promises.lookup;
+
+    const result = await lookupHostAll(createSafeLookup(resolver), 'publisher.test');
+
+    expect(result.error).toBeUndefined();
+    expect(result.addresses).toEqual([
+      { address: '93.184.216.34', family: 4 },
+      { address: '2606:4700:4700::1111', family: 6 },
+    ]);
+  });
+
+  it('returns a single validated literal as an array when all answers are requested', async () => {
+    const lookup = createSafeLookup(vi.fn() as unknown as typeof dns.promises.lookup);
+
+    const result = await lookupHostAll(lookup, '93.184.216.34');
+
+    expect(result.addresses).toEqual([{ address: '93.184.216.34', family: 4 }]);
+  });
+
+  it('filters the returned answers to the requested address family', async () => {
+    const resolver = vi.fn(async () => [
+      { address: '2606:4700:4700::1111', family: 6 },
+      { address: '93.184.216.34', family: 4 },
+    ]) as unknown as typeof dns.promises.lookup;
+    const lookup = createSafeLookup(resolver);
+
+    const v4 = await lookupHost(lookup, 'publisher.test', { family: 4 });
+    const allV6 = await lookupAllAddresses(lookup, 'publisher.test', 6);
+
+    expect(v4.address).toBe('93.184.216.34');
+    expect(v4.family).toBe(4);
+    expect(allV6).toEqual([{ address: '2606:4700:4700::1111', family: 6 }]);
+  });
+
+  it('fails when no answer matches the requested address family', async () => {
+    const resolver = vi.fn(async () => [
+      { address: '93.184.216.34', family: 4 },
+    ]) as unknown as typeof dns.promises.lookup;
+
+    const result = await lookupHost(createSafeLookup(resolver), 'publisher.test', { family: 6 });
+
+    expect(result.error).toMatchObject({ code: 'ENOTFOUND' });
   });
 
   it.each([
