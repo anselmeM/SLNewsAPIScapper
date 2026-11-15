@@ -205,5 +205,27 @@ describe('http utilities', () => {
       expect(axios.get).toHaveBeenCalledTimes(1);
       expect(axios.get).toHaveBeenCalledWith('https://example.com', expect.objectContaining({ timeout: 500 }));
     });
+
+    it('disables ambient proxy configuration so the DNS pin cannot be bypassed', async () => {
+      const previous = process.env.HTTP_PROXY;
+      process.env.HTTP_PROXY = 'http://proxy.internal:8080';
+      try {
+        vi.mocked(axios.get).mockResolvedValueOnce({ data: 'ok', status: 200 } as never);
+        await fetchWithRetry('https://example.com');
+      } finally {
+        if (previous === undefined) delete process.env.HTTP_PROXY;
+        else process.env.HTTP_PROXY = previous;
+      }
+
+      expect(axios.get).toHaveBeenCalledWith('https://example.com', expect.objectContaining({ proxy: false }));
+    });
+
+    it('overrides a caller-supplied proxy', async () => {
+      vi.mocked(axios.get).mockResolvedValueOnce({ data: 'ok', status: 200 } as never);
+
+      await fetchWithRetry('https://example.com', { proxy: { host: 'proxy.example', port: 8080 } });
+
+      expect(axios.get).toHaveBeenCalledWith('https://example.com', expect.objectContaining({ proxy: false }));
+    });
   });
 });

@@ -122,6 +122,9 @@ export async function probeAndFingerprint(
       maxContentLength: 4 * 1024 * 1024,
       httpAgent: safeHttpAgent,
       httpsAgent: safeHttpsAgent,
+      // Ignore ambient proxy env vars: a proxy resolves the image host itself,
+      // which would bypass the validated DNS lookup the agents pin (SSRF).
+      proxy: false,
       headers: {
         'user-agent':
           'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Mobile Safari/537.36',

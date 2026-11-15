@@ -141,6 +141,11 @@ export async function fetchWithRetry(
       // used for this boundary.
       httpAgent: safeHttpAgent,
       httpsAgent: safeHttpsAgent,
+      // Ambient HTTP(S)_PROXY/ALL_PROXY variables must not be honoured: axios
+      // would send the request to the proxy, which resolves the feed-controlled
+      // hostname itself and bypasses the lookup above (SSRF via proxy). Direct,
+      // validated egress is the only supported path here.
+      proxy: false,
     };
     if (remainingMs !== undefined) {
       const configuredTimeout = attemptOptions.timeout;

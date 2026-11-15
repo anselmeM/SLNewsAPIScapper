@@ -1,8 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   fingerprintFromHeaders,
   imageDimensions,
   looksLikeChromeImage,
+  probeAndFingerprint,
   withImageFingerprint,
 } from '../services/image-pipeline.js';
 
@@ -49,5 +50,14 @@ describe('image pipeline', () => {
     const first = fingerprintFromHeaders({ etag: '"v1"' });
     const second = fingerprintFromHeaders({ etag: '"v2"' });
     expect(first).not.toBe(second);
+  });
+
+  it('disables ambient proxies for image fetches so the DNS pin cannot be bypassed', async () => {
+    const fetcher = vi.fn().mockResolvedValue({ data: png(1200, 800), headers: {} });
+
+    const probe = await probeAndFingerprint('https://cdn.test/story.png', { fetch: fetcher as never });
+
+    expect(probe.ok).toBe(true);
+    expect(fetcher).toHaveBeenCalledWith('https://cdn.test/story.png', expect.objectContaining({ proxy: false }));
   });
 });
