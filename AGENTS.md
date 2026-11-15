@@ -47,10 +47,11 @@ Standard push flow: `bash "C:\Users\amotc\.agents\skills\git-pushing\scripts\sma
 
 - `src/index.ts` / `src/server.ts` — Express app: auth (`requireAuthentication` +
   `requireScopes`: static key, Clerk JWT, or DB customer key; scope-guarded),
-  per-credential/IP API rate limiter (health exempt) plus a separate docs-UI
-  limiter (`DOCS_RATE_LIMIT_MAX`), CORS (one startup warning when
-  `CORS_ORIGIN` is unset in production), helmet, JSON 404, terminal error
-  handler, pino-http logging with credential redaction, graceful shutdown
+  per-credential/IP API rate limiter (health, readiness **and** docs paths
+  exempt) plus a separate docs-UI limiter (`DOCS_RATE_LIMIT_MAX`); CORS from
+  `resolveCorsOrigin` (the unset-production wildcard warning is emitted once by
+  `assertRuntimeEnv`), helmet, JSON 404, terminal error handler, pino-http
+  logging with credential redaction, graceful shutdown
   (`createShutdownHandler`: drains idle connections, unref'd force-exit timer,
   duplicate signals ignored) and fatal `unhandledRejection`/`uncaughtException`
   handlers. Boot-time env validation (`assertRuntimeEnv`) runs before `listen()`.
@@ -79,16 +80,25 @@ Standard push flow: `bash "C:\Users\amotc\.agents\skills\git-pushing\scripts\sma
 - `src/routes/stats.ts` — `/api/stats` and `/v1/stats` aggregate counts/freshness
   plus data-quality counters (`articles.missing_date`, `articles.empty_content`,
   `videos.missing_date`).
-- `src/services/scraper.ts` — RSS + sitemap ingestion with retry/backoff, upsert on
-  link, date/content provenance, metadata backfill inline per feed item
-  (article-page image fetches capped at 10 per run inside a 60 s budget), and a
-  bounded content-repair sweep (5 rows/run, 3 attempts each, run deadline).
+- `src/services/scraper.ts` — stable ingestion facade; the bounded phases live
+  under `src/services/ingestion/`: `run` (deadline, shared budgets,
+  orchestration), `feed` (RSS pass, dedupe, inline metadata/content backfill),
+  `backfill` (image sweep and empty-content repair sweep), `sitemap` (Telegraph
+  fallback) and `content` (page extraction plus `finalizeImageUrl`).
+- `src/services/image-pipeline.ts` — image probe/fingerprint: PNG/JPEG/GIF/WebP
+  dimensions, chrome filtering, cache-busting fingerprints, and SSRF-guard
+  rejection (an unsafe URL is never stored or served). `image-metrics.ts` tracks
+  backfill stats and stuck-backlog alerts.
 - `src/services/video-scraper.ts` — YouTube feed ingestion with date provenance.
-- `src/utils/` — `http.ts` (retry), `query.ts` (pagination/search/date parsing,
-  strict ISO calendar validation), `listFilters.ts` (shared `parseListFilters` +
-  `buildArticleWhere`/`buildVideoWhere` + `/v1` metadata mappers used by all four
-  list routes), `dates.ts` (`parsePublishedDate` → `{ date, source, raw }`, never
-  throws), `url.ts` (link normalization).
+- `src/utils/` — `http.ts` (retry/backoff over the pinned fetch), `safe-url.ts`
+  (SSRF URL guard and IPv4/IPv6 classification: loopback, private, ULA,
+  link-local, site-local, multicast, IPv4-mapped/compatible/translated,
+  6to4/NAT64), `safe-fetch.ts` (DNS-pinned agents, validated redirect following,
+  `all`-address lookup for Node's autoSelectFamily), `query.ts` (pagination/
+  search/date parsing, strict ISO calendar validation), `listFilters.ts` (shared
+  `parseListFilters` + `buildArticleWhere`/`buildVideoWhere` + `/v1` metadata
+  mappers used by all four list routes), `dates.ts` (`parsePublishedDate` →
+  `{ date, source, raw }`, never throws), `url.ts` (link normalization).
 - `src/config/` — sources, video sources, Swagger (`swagger.ts` falls back to
   `dist/routes/*.js` so `/docs` works in the Docker image), and `env.ts`
   (fail-fast boot validation: missing `DATABASE_URL`, invalid `NODE_ENV`/`PORT`,
