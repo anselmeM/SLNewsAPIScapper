@@ -1,7 +1,12 @@
 import axios from 'axios';
 import { createHash } from 'node:crypto';
 import { assertSafeFetchUrl } from '../utils/safe-url.js';
-import { safeHttpAgent, safeHttpsAgent } from '../utils/safe-fetch.js';
+import {
+  fetchFollowingSafeRedirects,
+  isOkOrRedirectStatus,
+  safeHttpAgent,
+  safeHttpsAgent,
+} from '../utils/safe-fetch.js';
 
 /** Minimum acceptable story image; below this it is a logo or spacer. */
 export const MIN_IMAGE_WIDTH = 300;
@@ -116,21 +121,27 @@ export async function probeAndFingerprint(
   }
   const fetcher = options.fetch ?? axios.get;
   try {
-    const response = await fetcher(url, {
-      responseType: 'arraybuffer',
-      timeout: 8000,
-      maxContentLength: 4 * 1024 * 1024,
-      httpAgent: safeHttpAgent,
-      httpsAgent: safeHttpsAgent,
-      // Ignore ambient proxy env vars: a proxy resolves the image host itself,
-      // which would bypass the validated DNS lookup the agents pin (SSRF).
-      proxy: false,
-      headers: {
-        'user-agent':
-          'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Mobile Safari/537.36',
-        referer: `${new URL(url).origin}/`,
-      },
-    });
+    const response = await fetchFollowingSafeRedirects(url, (target) =>
+      fetcher(target, {
+        responseType: 'arraybuffer',
+        timeout: 8000,
+        maxContentLength: 4 * 1024 * 1024,
+        httpAgent: safeHttpAgent,
+        httpsAgent: safeHttpsAgent,
+        // Ignore ambient proxy env vars: a proxy resolves the image host itself,
+        // which would bypass the validated DNS lookup the agents pin (SSRF).
+        proxy: false,
+        // Follow redirects through the validated helper instead of axios, so a
+        // Location pointing at a private address can never be dialled.
+        maxRedirects: 0,
+        validateStatus: isOkOrRedirectStatus,
+        headers: {
+          'user-agent':
+            'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Mobile Safari/537.36',
+          referer: `${new URL(url).origin}/`,
+        },
+      }),
+    );
     const dimensions = imageDimensions(Buffer.from(response.data));
     if (!dimensions) {
       return { url, width: null, height: null, ok: true, reason: 'unreadable' };

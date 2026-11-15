@@ -1,6 +1,6 @@
 import dns from 'node:dns';
 import { describe, expect, it, vi } from 'vitest';
-import { createSafeLookup } from '../utils/safe-fetch.js';
+import { createSafeLookup, fetchFollowingSafeRedirects } from '../utils/safe-fetch.js';
 import { UnsafeFetchUrlError } from '../utils/safe-url.js';
 
 function lookupHost(
@@ -73,5 +73,60 @@ describe('safe DNS lookup', () => {
     expect(result.error).toBeUndefined();
     expect(result.address).toBe('93.184.216.34');
     expect(resolver).not.toHaveBeenCalled();
+  });
+});
+
+describe('safe redirect following', () => {
+  const response = (status: number, location?: string): { status: number; headers: unknown } => ({
+    status,
+    headers: location ? { location } : {},
+  });
+
+  it('follows a relative redirect and returns the final response', async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce(response(302, '/next'))
+      .mockResolvedValueOnce({ status: 200, headers: {} });
+
+    const final = await fetchFollowingSafeRedirects('https://publisher.test/a', request);
+
+    expect(final.status).toBe(200);
+    expect(request).toHaveBeenNthCalledWith(2, 'https://publisher.test/next');
+  });
+
+  it('rejects a redirect to a private IP literal before requesting it', async () => {
+    const request = vi.fn().mockResolvedValueOnce(response(301, 'http://169.254.169.254/latest/meta-data'));
+
+    await expect(fetchFollowingSafeRedirects('https://publisher.test/a', request)).rejects.toBeInstanceOf(
+      UnsafeFetchUrlError,
+    );
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a redirect to a non-HTTP scheme', async () => {
+    const request = vi.fn().mockResolvedValueOnce(response(302, 'file:///etc/passwd'));
+
+    await expect(fetchFollowingSafeRedirects('https://publisher.test/a', request)).rejects.toBeInstanceOf(
+      UnsafeFetchUrlError,
+    );
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects after the redirect budget is exhausted', async () => {
+    const request = vi.fn().mockResolvedValue(response(302, '/loop'));
+
+    await expect(fetchFollowingSafeRedirects('https://publisher.test/a', request, 2)).rejects.toThrow(
+      'too many redirects',
+    );
+    expect(request).toHaveBeenCalledTimes(3);
+  });
+
+  it('returns a redirect without a Location header as-is', async () => {
+    const request = vi.fn().mockResolvedValueOnce(response(302));
+
+    const result = await fetchFollowingSafeRedirects('https://publisher.test/a', request);
+
+    expect(result.status).toBe(302);
+    expect(request).toHaveBeenCalledTimes(1);
   });
 });

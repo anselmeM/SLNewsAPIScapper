@@ -1,7 +1,7 @@
 import axios, { AxiosRequestConfig, AxiosResponse } from 'axios';
 import logger from '../logger.js';
 import { assertSafeFetchUrl, UnsafeFetchUrlError } from './safe-url.js';
-import { safeHttpAgent, safeHttpsAgent } from './safe-fetch.js';
+import { fetchFollowingSafeRedirects, isOkOrRedirectStatus, safeHttpAgent, safeHttpsAgent } from './safe-fetch.js';
 
 // A browser-like UA is the compatibility default. Set SCRAPER_USER_AGENT to a
 // descriptive bot identifier without changing any of the scraping behaviour.
@@ -146,6 +146,10 @@ export async function fetchWithRetry(
       // hostname itself and bypasses the lookup above (SSRF via proxy). Direct,
       // validated egress is the only supported path here.
       proxy: false,
+      // Redirects are followed manually so every Location is validated before
+      // the next request; the safe redirect helper owns the 5-hop limit.
+      maxRedirects: 0,
+      validateStatus: isOkOrRedirectStatus,
     };
     if (remainingMs !== undefined) {
       const configuredTimeout = attemptOptions.timeout;
@@ -154,7 +158,7 @@ export async function fetchWithRetry(
     }
 
     try {
-      return await axios.get(url, attemptOptions);
+      return await fetchFollowingSafeRedirects(url, (target) => axios.get(target, attemptOptions));
     } catch (err) {
       lastError = err;
       if (isUnsafeFetchError(err)) throw err;
