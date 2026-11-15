@@ -112,6 +112,8 @@ function isPrivateIpv6(bytes: number[]): boolean {
   if ((b0 & 0xfe) === 0xfc) return true;
   // Link-local fe80::/10.
   if (b0 === 0xfe && (b1 & 0xc0) === 0x80) return true;
+  // Deprecated site-local fec0::/10 — still routable inside some networks.
+  if (b0 === 0xfe && (b1 & 0xc0) === 0xc0) return true;
   // Multicast ff00::/8.
   if (b0 === 0xff) return true;
   // 6to4 2002::/16 embeds the IPv4 destination in bytes 2-5.

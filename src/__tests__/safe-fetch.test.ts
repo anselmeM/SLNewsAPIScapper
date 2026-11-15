@@ -116,6 +116,7 @@ describe('safe DNS lookup', () => {
     ['private IPv4', '10.20.30.40'],
     ['link-local metadata', '169.254.169.254'],
     ['private IPv6', 'fd00::1'],
+    ['site-local IPv6', 'fec0::1'],
   ])('rejects a %s DNS answer', async (_label, address) => {
     const resolver = vi.fn(async () => [
       { address, family: address.includes(':') ? 6 : 4 },
