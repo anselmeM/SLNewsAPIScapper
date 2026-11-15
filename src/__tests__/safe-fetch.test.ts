@@ -58,6 +58,17 @@ describe('safe DNS lookup', () => {
     expect(result.error).toBeInstanceOf(UnsafeFetchUrlError);
   });
 
+  it.each(['::ffff:7f00:1', '0:0:0:0:0:ffff:127.0.0.1'])(
+    'rejects a private IPv4-mapped DNS answer (%s)',
+    async (address) => {
+      const resolver = vi.fn(async () => [{ address, family: 6 }]) as unknown as typeof dns.promises.lookup;
+
+      const result = await lookupHost(createSafeLookup(resolver), 'rebind.test');
+
+      expect(result.error).toBeInstanceOf(UnsafeFetchUrlError);
+    },
+  );
+
   it('rejects private IP literals without asking DNS', async () => {
     const resolver = vi.fn() as unknown as typeof dns.promises.lookup;
     const result = await lookupHost(createSafeLookup(resolver), '127.0.0.1');
