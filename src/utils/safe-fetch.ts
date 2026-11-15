@@ -4,7 +4,17 @@ import https from 'node:https';
 import net from 'node:net';
 import { UnsafeFetchUrlError, assertSafeFetchUrl, isPrivateAddress } from './safe-url.js';
 
-type LookupCallback = (err: NodeJS.ErrnoException | null, address?: string, family?: number) => void;
+type LookupCallback = (
+  err: NodeJS.ErrnoException | null,
+  address?: string | dns.LookupAddress[],
+  family?: number,
+) => void;
+
+function noUsableAddress(hostname: string): NodeJS.ErrnoException {
+  const error = new Error(`DNS lookup returned no usable address for ${hostname}`) as NodeJS.ErrnoException;
+  error.code = 'ENOTFOUND';
+  return error;
+}
 
 /**
  * DNS lookup bound to an HTTP(S) agent.
@@ -14,18 +24,36 @@ type LookupCallback = (err: NodeJS.ErrnoException | null, address?: string, fami
  * DNS server cannot answer with a public IP for the check and a private one
  * for the connection. Feed-controlled image/article URLs must never reach
  * Render-internal addresses or cloud metadata endpoints.
+ *
+ * Node's `autoSelectFamily` path (the default on Node 20+) calls the lookup
+ * with `all: true` and expects the validated address array back; returning a
+ * single address there makes the socket fail. The scalar shape is used for the
+ * classic single-address path.
  */
 export function createSafeLookup(
   resolver: typeof dns.promises.lookup = dns.promises.lookup,
 ): (hostname: string, options: dns.LookupOptions, callback: LookupCallback) => void {
-  return (hostname: string, _options: dns.LookupOptions, callback: LookupCallback): void => {
+  return (hostname: string, options: dns.LookupOptions, callback: LookupCallback): void => {
+    const respond = (addresses: dns.LookupAddress[]): void => {
+      if (options.all) {
+        callback(null, addresses);
+        return;
+      }
+      const first = addresses[0];
+      if (!first) {
+        callback(noUsableAddress(hostname));
+        return;
+      }
+      callback(null, first.address, first.family);
+    };
+
     const literal = net.isIP(hostname);
     if (literal) {
       if (isPrivateAddress(hostname)) {
         callback(new UnsafeFetchUrlError('address'));
         return;
       }
-      callback(null, hostname, literal);
+      respond([{ address: hostname, family: literal }]);
       return;
     }
 
@@ -35,16 +63,19 @@ export function createSafeLookup(
           callback(new UnsafeFetchUrlError('address'));
           return;
         }
+        // Validate every answer, even ones the socket may not use, so a mixed
+        // public/private response is rejected rather than partially pinned.
         if (addresses.some((entry) => isPrivateAddress(entry.address))) {
           callback(new UnsafeFetchUrlError('address'));
           return;
         }
-        const first = addresses[0];
-        if (!first) {
-          callback(new UnsafeFetchUrlError('address'));
+        const family = options.family;
+        const usable = family === 4 || family === 6 ? addresses.filter((entry) => entry.family === family) : addresses;
+        if (usable.length === 0) {
+          callback(noUsableAddress(hostname));
           return;
         }
-        callback(null, first.address, first.family);
+        respond(usable);
       },
       (error: unknown) => {
         callback(error instanceof Error ? (error as NodeJS.ErrnoException) : new UnsafeFetchUrlError('address'));
