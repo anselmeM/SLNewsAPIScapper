@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import axios from 'axios';
 import logger from '../logger.js';
+import { UnsafeFetchUrlError } from '../utils/safe-url.js';
 import {
   sleep,
   fetchWithRetry,
@@ -226,6 +227,33 @@ describe('http utilities', () => {
       await fetchWithRetry('https://example.com', { proxy: { host: 'proxy.example', port: 8080 } });
 
       expect(axios.get).toHaveBeenCalledWith('https://example.com', expect.objectContaining({ proxy: false }));
+    });
+
+    it('follows redirects manually and validates every hop', async () => {
+      vi.mocked(axios.get)
+        .mockResolvedValueOnce({ status: 302, headers: { location: 'https://cdn.example/final' }, data: '' } as never)
+        .mockResolvedValueOnce({ status: 200, headers: {}, data: 'ok' } as never);
+
+      const res = await fetchWithRetry('https://example.com/start');
+
+      expect(res.data).toBe('ok');
+      expect(axios.get).toHaveBeenCalledTimes(2);
+      expect(axios.get).toHaveBeenNthCalledWith(
+        2,
+        'https://cdn.example/final',
+        expect.objectContaining({ maxRedirects: 0, proxy: false }),
+      );
+    });
+
+    it('does not follow a redirect to a private address', async () => {
+      vi.mocked(axios.get).mockResolvedValueOnce({
+        status: 302,
+        headers: { location: 'http://169.254.169.254/latest/meta-data' },
+        data: '',
+      } as never);
+
+      await expect(fetchWithRetry('https://example.com/start')).rejects.toBeInstanceOf(UnsafeFetchUrlError);
+      expect(axios.get).toHaveBeenCalledTimes(1);
     });
   });
 });

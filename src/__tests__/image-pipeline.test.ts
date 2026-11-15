@@ -60,4 +60,38 @@ describe('image pipeline', () => {
     expect(probe.ok).toBe(true);
     expect(fetcher).toHaveBeenCalledWith('https://cdn.test/story.png', expect.objectContaining({ proxy: false }));
   });
+
+  it('follows a safe image redirect through the validated helper', async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce({
+        status: 302,
+        headers: { location: 'https://cdn2.test/story.png' },
+        data: Buffer.alloc(0),
+      })
+      .mockResolvedValueOnce({ status: 200, headers: {}, data: png(1200, 800) });
+
+    const probe = await probeAndFingerprint('https://cdn.test/story.png', { fetch: fetcher as never });
+
+    expect(probe.ok).toBe(true);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher).toHaveBeenNthCalledWith(
+      2,
+      'https://cdn2.test/story.png',
+      expect.objectContaining({ maxRedirects: 0 }),
+    );
+  });
+
+  it('never follows an image redirect to a private address', async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      status: 302,
+      headers: { location: 'http://127.0.0.1/secret.png' },
+      data: Buffer.alloc(0),
+    });
+
+    const probe = await probeAndFingerprint('https://cdn.test/story.png', { fetch: fetcher as never });
+
+    expect(probe).toMatchObject({ ok: true, reason: 'fetch-failed' });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
 });
