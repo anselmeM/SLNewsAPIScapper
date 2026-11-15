@@ -3,7 +3,7 @@ import net from 'node:net';
 /** Thrown when a URL must not be fetched by the scraper. */
 export class UnsafeFetchUrlError extends Error {}
 
-function privateIp(address: string): boolean {
+export function isPrivateAddress(address: string): boolean {
   if (net.isIPv4(address)) {
     const parts = address.split('.').map(Number);
     const a = parts[0] ?? 0;
@@ -30,7 +30,7 @@ function privateIp(address: string): boolean {
       value.startsWith('feb') ||
       value.startsWith('fc') ||
       value.startsWith('fd') ||
-      (value.startsWith('::ffff:') && privateIp(value.slice(7)))
+      (value.startsWith('::ffff:') && isPrivateAddress(value.slice(7)))
     );
   }
   return true;
@@ -65,6 +65,6 @@ export function assertSafeFetchUrl(raw: string): URL {
   ) {
     throw new UnsafeFetchUrlError('host');
   }
-  if (net.isIP(host) && privateIp(host)) throw new UnsafeFetchUrlError('address');
+  if (net.isIP(host) && isPrivateAddress(host)) throw new UnsafeFetchUrlError('address');
   return url;
 }

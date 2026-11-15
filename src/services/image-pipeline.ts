@@ -1,5 +1,7 @@
 import axios from 'axios';
 import { createHash } from 'node:crypto';
+import { assertSafeFetchUrl } from '../utils/safe-url.js';
+import { safeHttpAgent, safeHttpsAgent } from '../utils/safe-fetch.js';
 
 /** Minimum acceptable story image; below this it is a logo or spacer. */
 export const MIN_IMAGE_WIDTH = 300;
@@ -91,7 +93,7 @@ export interface ImageProbe {
   width: number | null;
   height: number | null;
   ok: boolean;
-  reason?: 'chrome' | 'too-small' | 'fetch-failed' | 'unreadable';
+  reason?: 'chrome' | 'too-small' | 'fetch-failed' | 'unreadable' | 'unsafe';
 }
 
 /**
@@ -104,6 +106,11 @@ export async function probeAndFingerprint(
   url: string,
   options: { fetch?: typeof axios.get; minWidth?: number; minHeight?: number } = {},
 ): Promise<ImageProbe> {
+  try {
+    assertSafeFetchUrl(url);
+  } catch {
+    return { url, width: null, height: null, ok: false, reason: 'unsafe' };
+  }
   if (looksLikeChromeImage(url)) {
     return { url, width: null, height: null, ok: false, reason: 'chrome' };
   }
@@ -113,6 +120,8 @@ export async function probeAndFingerprint(
       responseType: 'arraybuffer',
       timeout: 8000,
       maxContentLength: 4 * 1024 * 1024,
+      httpAgent: safeHttpAgent,
+      httpsAgent: safeHttpsAgent,
       headers: {
         'user-agent':
           'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Mobile Safari/537.36',

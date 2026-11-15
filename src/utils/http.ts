@@ -1,6 +1,7 @@
 import axios, { AxiosRequestConfig, AxiosResponse } from 'axios';
 import logger from '../logger.js';
-import { assertSafeFetchUrl } from './safe-url.js';
+import { assertSafeFetchUrl, UnsafeFetchUrlError } from './safe-url.js';
+import { safeHttpAgent, safeHttpsAgent } from './safe-fetch.js';
 
 // A browser-like UA is the compatibility default. Set SCRAPER_USER_AGENT to a
 // descriptive bot identifier without changing any of the scraping behaviour.
@@ -86,6 +87,10 @@ export function computeRetryDelayMs(
   return Math.round(base + jitter);
 }
 
+function isUnsafeFetchError(err: unknown): boolean {
+  if (err instanceof UnsafeFetchUrlError) return true;
+  return (err as { cause?: unknown }).cause instanceof UnsafeFetchUrlError;
+}
 function deadlineExceededError(url: string, deadlineMs: number): Error {
   const error = new Error(`Request deadline exceeded for ${url} (deadline ${deadlineMs})`) as Error & { code: string };
   error.code = 'DEADLINE_EXCEEDED';
@@ -129,17 +134,25 @@ export async function fetchWithRetry(
       throw deadlineExceededError(url, deadlineMs as number);
     }
 
-    let attemptOptions: AxiosRequestConfig = options;
+    let attemptOptions: AxiosRequestConfig = {
+      ...options,
+      // Pin every connection to the DNS answer that was validated by the
+      // agent's lookup callback. Caller-supplied agents are intentionally not
+      // used for this boundary.
+      httpAgent: safeHttpAgent,
+      httpsAgent: safeHttpsAgent,
+    };
     if (remainingMs !== undefined) {
-      const configuredTimeout = options.timeout;
+      const configuredTimeout = attemptOptions.timeout;
       const cappedTimeout = configuredTimeout === undefined ? remainingMs : Math.min(configuredTimeout, remainingMs);
-      attemptOptions = { ...options, timeout: Math.max(1, cappedTimeout) };
+      attemptOptions = { ...attemptOptions, timeout: Math.max(1, cappedTimeout) };
     }
 
     try {
       return await axios.get(url, attemptOptions);
     } catch (err) {
       lastError = err;
+      if (isUnsafeFetchError(err)) throw err;
       const status = (err as { response?: { status?: number } }).response?.status;
       // Unknown status means a transport-level error (DNS, timeout, reset).
       const retryable = status === undefined || status === 429 || status >= 500;

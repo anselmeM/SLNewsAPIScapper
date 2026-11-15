@@ -88,6 +88,16 @@ describe('image pipeline edge cases', () => {
   });
 });
 
+it('rejects an internal image URL before calling the fetcher', async () => {
+  const fetcher = vi.fn();
+  const result = await probeAndFingerprint('http://169.254.169.254/latest/meta-data.jpg', {
+    fetch: fetcher as never,
+  });
+
+  expect(result).toMatchObject({ ok: false, reason: 'unsafe' });
+  expect(fetcher).not.toHaveBeenCalled();
+});
+
 describe('safe URL edge cases', () => {
   it('rejects credentials and internal hostnames', () => {
     expect(() => assertSafeFetchUrl('https://user:pass@example.com/a')).toThrow(UnsafeFetchUrlError);
