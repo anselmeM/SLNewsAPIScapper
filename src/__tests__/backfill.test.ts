@@ -138,4 +138,26 @@ describe('backfillImages', () => {
       'Image backfill backlog is stuck',
     );
   });
+
+  it('clears an unsafe revalidated image instead of leaving it stored', async () => {
+    mocks.count.mockResolvedValue(0);
+    mocks.findMany.mockImplementation((args: { where: { imageUrl?: unknown } }) => {
+      if (args.where.imageUrl && typeof args.where.imageUrl === 'object') {
+        return Promise.resolve([{ id: 4, imageUrl: 'http://169.254.169.254/latest/meta-data.jpg' }]);
+      }
+      return Promise.resolve([]);
+    });
+    mocks.probe.mockResolvedValue({
+      ok: false,
+      reason: 'unsafe',
+      url: 'http://169.254.169.254/latest/meta-data.jpg',
+    });
+
+    await backfillImages(Date.now() + 60_000);
+
+    expect(mocks.update).toHaveBeenCalledWith({
+      where: { id: 4 },
+      data: { imageUrl: null },
+    });
+  });
 });

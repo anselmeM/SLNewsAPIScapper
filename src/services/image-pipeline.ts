@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { createHash } from 'node:crypto';
-import { assertSafeFetchUrl } from '../utils/safe-url.js';
+import { assertSafeFetchUrl, isUnsafeFetchError } from '../utils/safe-url.js';
 import {
   fetchFollowingSafeRedirects,
   isOkOrRedirectStatus,
@@ -105,7 +105,9 @@ export interface ImageProbe {
  * Validates an image and returns a cache-busting URL.
  *
  * A failed fetch is not a rejection: the URL is kept unchanged so a temporary
- * CDN error cannot remove every picture from the feed.
+ * CDN error cannot remove every picture from the feed. Rejections from the SSRF
+ * guard (blocked URL, redirect or DNS answer) are different and are reported as
+ * `unsafe` so callers never store or serve them.
  */
 export async function probeAndFingerprint(
   url: string,
@@ -158,7 +160,10 @@ export async function probeAndFingerprint(
       url: withImageFingerprint(url, fingerprint),
       ok: true,
     };
-  } catch {
+  } catch (error) {
+    if (isUnsafeFetchError(error)) {
+      return { url, width: null, height: null, ok: false, reason: 'unsafe' };
+    }
     return { url, width: null, height: null, ok: true, reason: 'fetch-failed' };
   }
 }

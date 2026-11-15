@@ -75,6 +75,11 @@ export async function backfillImages(deadlineAt: number): Promise<void> {
         reason: probe.reason ?? 'probe-failed',
         at: Date.now(),
       });
+      // An unsafe image is not a transient failure: clear it so the API never
+      // serves a URL that the SSRF guard rejected.
+      if (probe.reason === 'unsafe') {
+        await prisma.article.update({ where: { id: article.id }, data: { imageUrl: null } });
+      }
       continue;
     }
     if (probe.url !== article.imageUrl) {

@@ -1,6 +1,6 @@
 import axios, { AxiosRequestConfig, AxiosResponse } from 'axios';
 import logger from '../logger.js';
-import { assertSafeFetchUrl, UnsafeFetchUrlError } from './safe-url.js';
+import { assertSafeFetchUrl, isUnsafeFetchError } from './safe-url.js';
 import { fetchFollowingSafeRedirects, isOkOrRedirectStatus, safeHttpAgent, safeHttpsAgent } from './safe-fetch.js';
 
 // A browser-like UA is the compatibility default. Set SCRAPER_USER_AGENT to a
@@ -87,10 +87,6 @@ export function computeRetryDelayMs(
   return Math.round(base + jitter);
 }
 
-function isUnsafeFetchError(err: unknown): boolean {
-  if (err instanceof UnsafeFetchUrlError) return true;
-  return (err as { cause?: unknown }).cause instanceof UnsafeFetchUrlError;
-}
 function deadlineExceededError(url: string, deadlineMs: number): Error {
   const error = new Error(`Request deadline exceeded for ${url} (deadline ${deadlineMs})`) as Error & { code: string };
   error.code = 'DEADLINE_EXCEEDED';
