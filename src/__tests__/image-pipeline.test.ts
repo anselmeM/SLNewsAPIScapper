@@ -6,6 +6,7 @@ import {
   probeAndFingerprint,
   withImageFingerprint,
 } from '../services/image-pipeline.js';
+import { UnsafeFetchUrlError } from '../utils/safe-url.js';
 
 function png(width: number, height: number): Buffer {
   const buffer = Buffer.alloc(33);
@@ -91,7 +92,26 @@ describe('image pipeline', () => {
 
     const probe = await probeAndFingerprint('https://cdn.test/story.png', { fetch: fetcher as never });
 
-    expect(probe).toMatchObject({ ok: true, reason: 'fetch-failed' });
+    expect(probe).toMatchObject({ ok: false, reason: 'unsafe' });
     expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports SSRF guard rejections as unsafe rather than fetch-failed', async () => {
+    const direct = vi.fn().mockRejectedValue(new UnsafeFetchUrlError('address'));
+    await expect(
+      probeAndFingerprint('https://cdn.test/blocked.png', { fetch: direct as never }),
+    ).resolves.toMatchObject({ ok: false, reason: 'unsafe' });
+
+    const wrappedError = new Error('blocked') as Error & { cause?: unknown };
+    wrappedError.cause = new UnsafeFetchUrlError('address');
+    const wrapped = vi.fn().mockRejectedValue(wrappedError);
+    await expect(
+      probeAndFingerprint('https://cdn.test/blocked2.png', { fetch: wrapped as never }),
+    ).resolves.toMatchObject({ ok: false, reason: 'unsafe' });
+
+    const transient = vi.fn().mockRejectedValue(new Error('down'));
+    await expect(
+      probeAndFingerprint('https://cdn.test/down.png', { fetch: transient as never }),
+    ).resolves.toMatchObject({ ok: true, reason: 'fetch-failed' });
   });
 });

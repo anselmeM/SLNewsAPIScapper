@@ -251,8 +251,9 @@ export async function fetchArticlePage(
  * Validates and fingerprints an image before it is stored.
  *
  * Cheap rejections (logos/spacers) are free; byte-level dimension checks are
- * budgeted per run. A failed fetch keeps the original URL — a flaky CDN must
- * not remove every picture from the feed.
+ * budgeted per run. A transient fetch failure keeps the original URL — a flaky
+ * CDN must not remove every picture from the feed — but an unsafe (SSRF-blocked)
+ * image is dropped instead of being stored and served.
  */
 export async function finalizeImageUrl(candidate: string | null): Promise<string | null> {
   if (!candidate) return null;
@@ -260,8 +261,7 @@ export async function finalizeImageUrl(candidate: string | null): Promise<string
   if (imageValidations >= MAX_IMAGE_VALIDATIONS_PER_RUN) return candidate;
   imageValidations += 1;
   const probe = await probeAndFingerprint(candidate);
-  if (!probe.ok && probe.reason === 'too-small') return null;
-  return probe.url;
+  return probe.ok ? probe.url : null;
 }
 
 /** Page fetch used only for image backfill of already-stored articles. */

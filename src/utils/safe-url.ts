@@ -3,6 +3,19 @@ import net from 'node:net';
 /** Thrown when a URL must not be fetched by the scraper. */
 export class UnsafeFetchUrlError extends Error {}
 
+/**
+ * True when an error (or its cause/aggregate) came from the SSRF guard, so
+ * callers can report it as a deliberate rejection rather than a fetch failure.
+ */
+export function isUnsafeFetchError(error: unknown): boolean {
+  if (error instanceof UnsafeFetchUrlError) return true;
+  if (!error || typeof error !== 'object') return false;
+  const cause = (error as { cause?: unknown }).cause;
+  if (cause instanceof UnsafeFetchUrlError) return true;
+  const nested = (error as { errors?: unknown }).errors;
+  return Array.isArray(nested) && nested.some((entry) => entry instanceof UnsafeFetchUrlError);
+}
+
 function isPrivateIpv4(address: string): boolean {
   const parts = address.split('.').map(Number);
   const a = parts[0] ?? 0;
