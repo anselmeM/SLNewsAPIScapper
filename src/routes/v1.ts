@@ -127,6 +127,14 @@ const ARTICLE_META_SELECT = {
  *                       published_at:
  *                         type: string
  *                         format: date-time
+ *                       teams:
+ *                         type: array
+ *                         items:
+ *                           type: string
+ *                         description: |
+ *                           Follow ids the story is about (`league:spl`,
+ *                           `team:leone-stars`), derived from the headline and
+ *                           summary. Empty when no followable subject matched.
  *                 meta:
  *                   type: object
  *                   required: [page, page_size, total, has_more, next_cursor]

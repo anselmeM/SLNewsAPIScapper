@@ -1,4 +1,5 @@
 import { toWatchUrl } from './videoUrl.js';
+import { tagsForText } from '../services/team-tags.js';
 /**
  * Pure helpers shared by the four list routes (`/api/news`, `/api/videos`,
  * `/v1/news`, `/v1/videos`).
@@ -184,6 +185,9 @@ export function toArticleMeta(article: {
     category: article.category,
     url: article.link,
     published_at: article.pubDate,
+    // Follow ids the story is about, derived from its text because the feeds
+    // carry no such metadata. Additive: consumers that ignore it are unaffected.
+    teams: tagsForText(article.title, article.description),
   };
 }
 
