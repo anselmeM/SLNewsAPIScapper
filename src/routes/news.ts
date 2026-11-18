@@ -5,6 +5,7 @@ import { SIERRA_LEONE_SOURCES } from '../config/sources.js';
 import { parsePositiveInt } from '../utils/query.js';
 import { parsePagination } from '../utils/pagination.js';
 import { buildArticleWhere, parseListFilters } from '../utils/listFilters.js';
+import { tagsForText } from '../services/team-tags.js';
 import logger from '../logger.js';
 
 const router = Router();
@@ -107,7 +108,14 @@ router.get('/', async (req: Request, res: Response) => {
     // Authenticated data: shared caches must not serve it. `s-maxage` would only
     // apply to shared caches, which `private` excludes, so it is intentionally absent.
     res.set('Cache-Control', 'private, max-age=300');
-    res.json(articles);
+    // The sync consumer uses this full-text surface, not `/v1/news`, so the
+    // subject tags have to be derived here as well as there.
+    res.json(
+      articles.map((article) => ({
+        ...article,
+        teams: tagsForText(article.title, article.description),
+      })),
+    );
   } catch (error) {
     logger.error(error, 'Failed to fetch articles');
     res.status(500).json({ error: 'Failed to retrieve articles' });

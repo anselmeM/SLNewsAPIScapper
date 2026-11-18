@@ -391,6 +391,8 @@ describe('Versioned API v1', () => {
       category: ['Politics'],
       url: 'https://example.com/article-1',
       published_at: '2025-01-01T00:00:00.000Z',
+      // No followable subject in this headline.
+      teams: [],
     });
     expect(res.body.meta).toEqual({ page: 1, page_size: 20, total: 1, has_more: false, next_cursor: null });
     // Sellable feed excludes rows whose published date could not be parsed.
