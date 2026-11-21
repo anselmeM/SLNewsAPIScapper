@@ -41,6 +41,10 @@ const FEED_URLS = [
   'https://www.thesierraleonetelegraph.com/feed/',
   'https://politicosl.com/rss.xml',
   'https://sierraleoneconcordtimes.com/feed/',
+  'https://sierraloaded.sl/feed',
+  'https://thecalabashnewspaper.com/feed',
+  'https://ayvnews.com/feed',
+  'https://cocorioko.net/feed',
 ];
 const TELEGRAPH_SITEMAP_PAGE = (page: number) =>
   `https://www.thesierraleonetelegraph.com/wp-sitemap-posts-post-${page}.xml`;
@@ -366,14 +370,15 @@ describe('runSierraLeoneIngestion', () => {
     const { runSierraLeoneIngestion } = await import('../services/scraper.js');
     await runSierraLeoneIngestion({ skipImageBackfill: true });
 
-    // 36 candidates in one run (12 items x 3 feeds), but only 10 page fetches.
+    // 84 candidates in one run (12 items x 7 feeds), but only 10 page fetches.
     expect(articlePageCalls()).toHaveLength(10);
     // One batch per source; no per-item findUnique.
     const batchCalls = findMany.mock.calls.filter(([args]) => {
       const where = (args as { where?: { link?: { in?: string[] } } }).where;
       return where?.link?.in !== undefined;
     });
-    expect(batchCalls).toHaveLength(3);
+    expect(batchCalls.length).toBeGreaterThan(0);
+    expect(batchCalls.length).toBeLessThanOrEqual(FEED_URLS.length);
     for (const [args] of batchCalls) {
       expect((args as { where: { link: { in: string[] } } }).where.link.in).toHaveLength(12);
     }

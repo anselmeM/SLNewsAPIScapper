@@ -19,4 +19,11 @@ describe('News sources configuration', () => {
     const names = SIERRA_LEONE_SOURCES.map((s) => s.name);
     expect(new Set(names).size).toBe(names.length);
   });
+
+  it('includes the verified local outlets from the 2026-11-21 source check', () => {
+    const names = SIERRA_LEONE_SOURCES.map((s) => s.name);
+    expect(names).toEqual(
+      expect.arrayContaining(['The Sierra Leone Telegraph', 'Sierraloaded', 'The Calabash', 'AYV News', 'Cocorioko']),
+    );
+  });
 });
