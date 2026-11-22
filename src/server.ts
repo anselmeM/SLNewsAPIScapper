@@ -316,6 +316,9 @@ app.get('/api/health', (_req, res) => {
     service: 'sl-news-api',
     uptime_seconds: runtimeMetrics().uptime_seconds,
     timestamp: new Date().toISOString(),
+    // Render injects this; it lets an operator confirm which commit is live
+    // without exposing anything beyond the public repository history.
+    commit: process.env.RENDER_GIT_COMMIT ?? null,
   });
 });
 

@@ -71,6 +71,7 @@ describe('GET /api/health (liveness)', () => {
     expect(res.body.status).toBe('ok');
     expect(res.body.service).toBe('sl-news-api');
     expect(res.body.uptime_seconds).toEqual(expect.any(Number));
+    expect(res.body).toHaveProperty('commit');
     expect(res.body.timestamp).toBeDefined();
     // Liveness must not depend on the database (that is /api/ready's job), so a
     // database outage can never make the platform restart a healthy process.

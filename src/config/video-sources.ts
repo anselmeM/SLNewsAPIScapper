@@ -15,26 +15,28 @@ export interface VideoSourceConfig {
  * `publishedAt desc`, so the rail is "newest across popular channels".
  *
  * Channels that went dormant (Swit Salone, Sierra Loaded, Salone News,
- * sierraleonenews) were removed rather than left to return stale clips.
+ * sierraleonenews, SLBC Sports, MegaMjr88) were removed rather than left to
+ * return stale clips. The official SLBC channel is @slbc.sl1; the older
+ * @slbctv4308 channel is dormant and must stay out of the rotation.
  */
 export const SIERRA_LEONE_VIDEO_SOURCES: VideoSourceConfig[] = [
   {
     name: 'AYV Media Empire',
     channelId: 'UCAAeZ5UM1LURZSWPGhteWpw',
     category: ['National', 'News'],
-    note: 'AYV primetime news and Wake Up Sierra Leone.',
+    note: 'AYV primetime news and Wake Up Sierra Leone (Atom feed verified 2026-11-21).',
   },
   {
     name: 'AYV News',
     channelId: 'UCou7SVOayoBeRMKURHHjlvw',
     category: ['National', 'News'],
-    note: 'AYV news desk clips.',
+    note: 'AYV news desk clips (Atom feed verified 2026-11-21).',
   },
   {
     name: 'SLBC News',
     channelId: 'UCEtHh4-TrhA-4BYgoGyCONQ',
     category: ['National', 'Broadcast'],
-    note: 'State broadcaster, daily news bulletins.',
+    note: 'Official SLBC channel (@slbc.sl1), daily news bulletins.',
   },
   {
     name: 'Sierraloaded TV',
@@ -43,16 +45,22 @@ export const SIERRA_LEONE_VIDEO_SOURCES: VideoSourceConfig[] = [
     note: 'Sierraloaded video desk: Leone Stars, AFCON, local sport.',
   },
   {
-    name: 'SLBC Sports',
-    channelId: 'UCbEJfXKDDgfje4jz7a8ZKZA',
-    category: ['Sports', 'Broadcast'],
-    note: 'State broadcaster sports desk.',
+    name: 'WI YONE BLOG MEDIA SL',
+    channelId: 'UC5VEDhlmBur-Vp1r6fhVQPA',
+    category: ['National', 'News'],
+    note: 'Community reporting and national news from Sierra Leone.',
   },
   {
-    name: 'MegaMjr88',
-    channelId: 'UCb2LaRKrQb6kZ2SsMDHl9ag',
-    category: ['Sports', 'Archive'],
-    note: 'Leone Stars training and archive footage.',
+    name: 'Wi Yard',
+    channelId: 'UCZQRp0r2C0PTZtzzzIgWP5w',
+    category: ['National', 'Politics'],
+    note: 'Sierra Leone politics, governance and public affairs.',
+  },
+  {
+    name: 'Komon-Tok',
+    channelId: 'UCpVJI6NCLYC3pxaLUeu8Djw',
+    category: ['Politics', 'Commentary'],
+    note: 'Krio commentary on Sierra Leone current affairs.',
   },
   {
     name: 'Vickie Remoe',
