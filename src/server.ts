@@ -346,6 +346,13 @@ app.use('/api/videos', requireAuthentication, requireScopes(SCOPES.INTERNAL_READ
 app.use('/api/stats', requireAuthentication, requireScopes(SCOPES.INTERNAL_READ), statsRouter);
 app.use('/v1/stats', requireAuthentication, requireScopes(SCOPES.V1_READ), statsRouter);
 
+// Public read-only contract for anonymous app readers. This is deliberately
+// summary-only (the same v1 payload), so signing in is not a content gate and
+// still exists only to sync saved stories, likes and follows. The global IP
+// rate limiter above applies to these routes too.
+app.use('/v1/public/news', v1Router);
+app.use('/v1/public/videos', v1VideosRouter);
+
 // Versioned business-facing contract: metadata + summary only, for future paying
 // customers. The SLNews app is deliberately pinned to the legacy full-text
 // /api/news route above and must not be switched to /v1 (it needs `paragraphs`).
