@@ -691,6 +691,38 @@ describe('Versioned API v1', () => {
   });
 });
 
+describe('public read-only content', () => {
+  it('serves the summary-only v1 news payload without authentication', async () => {
+    const mockFindMany = prisma.article.findMany as ReturnType<typeof vi.fn>;
+    mockFindMany.mockResolvedValueOnce(mockArticles);
+
+    const res = await app.get('/v1/public/news');
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(1);
+    expect(res.body.data[0]).not.toHaveProperty('paragraphs');
+    expect(res.body.data[0].title).toBe('Test Article');
+  });
+
+  it('does not expose public stats or internal routes', async () => {
+    const stats = await app.get('/v1/public/stats');
+    const news = await app.get('/api/public/news');
+
+    expect(stats.status).toBe(404);
+    expect(news.status).toBe(404);
+  });
+
+  it('serves public videos without authentication', async () => {
+    const mockFindMany = prisma.video.findMany as ReturnType<typeof vi.fn>;
+    mockFindMany.mockResolvedValueOnce([]);
+
+    const res = await app.get('/v1/public/videos');
+
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.data)).toBe(true);
+  });
+});
+
 describe('Rate limiting', () => {
   it('applies rate limit headers to API endpoints', async () => {
     const res = await app.get('/api/news');
